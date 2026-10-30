@@ -19,6 +19,7 @@ import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import java.util.HashMap;
 import java.security.cert.Certificate;
+import utils.CryptoService;
 
 public class SpertaClient {
 
@@ -301,27 +302,11 @@ public class SpertaClient {
                         Object keyResp = inStream.readObject();
                         if (keyResp instanceof byte[]) {
                             // 2. Extrair chave privada local para desempacotar a chave AES
-                            java.security.KeyStore ks = java.security.KeyStore.getInstance("PKCS12");
-                            try (java.io.FileInputStream fis = new java.io.FileInputStream(keystorePath)) {
-                                ks.load(fis, keystorePassword.toCharArray());
-                            }
-                            String usedAlias = username;
-                            if (!ks.containsAlias(usedAlias)) {
-                                java.util.Enumeration<String> aliases = ks.aliases();
-                                if (aliases.hasMoreElements()) {
-                                    usedAlias = aliases.nextElement();
-                                }
-                            }
-                            java.security.Key privKey = ks.getKey(usedAlias, keystorePassword.toCharArray());
-
-                            Cipher rsaUnwrap = Cipher.getInstance("RSA");
-                            rsaUnwrap.init(Cipher.UNWRAP_MODE, privKey);
-                            SecretKey aesKey = (SecretKey) rsaUnwrap.unwrap((byte[]) keyResp, "AES", Cipher.SECRET_KEY);
+                            java.security.PrivateKey privKey = loadPrivateKeyForUser(username, keystorePath, keystorePassword);
+                            SecretKey aesKey = CryptoService.unwrapKeyRSA((byte[]) keyResp, privKey);
 
                             // 3. Cifrar o valor numérico com AES-128 e codificar para Base64
-                            Cipher aesCipher = Cipher.getInstance("AES");
-                            aesCipher.init(Cipher.ENCRYPT_MODE, aesKey);
-                            byte[] encVal = aesCipher.doFinal(String.valueOf(v).getBytes("UTF-8"));
+                            byte[] encVal = CryptoService.encryptAES(String.valueOf(v), aesKey);
                             String newValBase64 = java.util.Base64.getEncoder().encodeToString(encVal);
 
                             // 4. Substituir a linha original pela linha cifrada
@@ -426,41 +411,51 @@ public class SpertaClient {
         }
     }
 
-    private HashMap<String, byte[]> generateAndWrapSectionKeys(String username, String ksPath, String ksPass) throws Exception {
-        HashMap<String, byte[]> map = new HashMap<>();
-        
-        // 1. Carregar a Keystore para extrair a Chave Pública do Owner
+    private String resolveKeystoreAlias(java.security.KeyStore ks, String username) throws Exception {
+        if (ks.containsAlias(username)) {
+            return username;
+        }
+
+        java.util.Enumeration<String> aliases = ks.aliases();
+        if (aliases.hasMoreElements()) {
+            return aliases.nextElement();
+        }
+
+        throw new Exception("Nenhum alias válido encontrado na keystore.");
+    }
+
+    private java.security.PrivateKey loadPrivateKeyForUser(String username, String ksPath, String ksPass) throws Exception {
         java.security.KeyStore ks = java.security.KeyStore.getInstance("PKCS12");
         try (java.io.FileInputStream fis = new java.io.FileInputStream(ksPath)) {
             ks.load(fis, ksPass.toCharArray());
         }
-        
+
+        String usedAlias = resolveKeystoreAlias(ks, username);
+        return CryptoService.loadPrivateKey(ksPath, ksPass.toCharArray(), usedAlias);
+    }
+
+    private HashMap<String, byte[]> generateAndWrapSectionKeys(String username, String ksPath, String ksPass) throws Exception {
+        HashMap<String, byte[]> map = new HashMap<>();
+
+        java.security.KeyStore ks = java.security.KeyStore.getInstance("PKCS12");
+        try (java.io.FileInputStream fis = new java.io.FileInputStream(ksPath)) {
+            ks.load(fis, ksPass.toCharArray());
+        }
+
         Certificate cert = ks.getCertificate(username);
         if (cert == null) {
-            java.util.Enumeration<String> aliases = ks.aliases();
-            if (aliases.hasMoreElements()) {
-                cert = ks.getCertificate(aliases.nextElement());
-            }
+            cert = ks.getCertificate(resolveKeystoreAlias(ks, username));
         }
         if (cert == null) {
             throw new Exception("Certificado não encontrado na keystore.");
         }
-        
-        java.security.PublicKey pubKey = cert.getPublicKey();
-        
-        // 2. Preparar a Cifra RSA em modo WRAP
-        Cipher rsaCipher = Cipher.getInstance("RSA");
-        rsaCipher.init(Cipher.WRAP_MODE, pubKey);
 
-        // 3. Preparar o Gerador de Chaves AES-128
-        KeyGenerator keyGen = KeyGenerator.getInstance("AES");
-        keyGen.init(128);
+        java.security.PublicKey pubKey = CryptoService.getPublicKeyFromCertBytes(cert.getEncoded());
 
-        // 4. Gerar e embrulhar uma chave para cada secção
         String[] sections = {"E", "G", "L", "M", "P", "S"};
         for (String s : sections) {
-            SecretKey aesKey = keyGen.generateKey();
-            byte[] wrappedKey = rsaCipher.wrap(aesKey);
+            SecretKey aesKey = CryptoService.generateAESKey();
+            byte[] wrappedKey = CryptoService.wrapKeyRSA(aesKey, pubKey);
             map.put(s, wrappedKey);
         }
         return map;
@@ -469,41 +464,12 @@ public class SpertaClient {
     private HashMap<String, byte[]> rewrapSectionKeys(HashMap<String, byte[]> keysToWrap, byte[] targetCertBytes, String username, String ksPath, String ksPass) throws Exception {
         HashMap<String, byte[]> newWrappedKeys = new HashMap<>();
 
-        // 1. Carregar a Keystore para sacar a Chave PRIVADA do current User
-        java.security.KeyStore ks = java.security.KeyStore.getInstance("PKCS12");
-        try (java.io.FileInputStream fis = new java.io.FileInputStream(ksPath)) {
-            ks.load(fis, ksPass.toCharArray());
-        }
-        // Normalmente o alias pode ser o username ou 1
-        String usedAlias = username;
-        if (!ks.containsAlias(usedAlias)) {
-            java.util.Enumeration<String> aliases = ks.aliases();
-            if (aliases.hasMoreElements()) {
-                usedAlias = aliases.nextElement();
-            }
-        }
-        
-        java.security.Key privKey = ks.getKey(usedAlias, ksPass.toCharArray());
-        if (privKey == null) {
-            throw new Exception("Chave privada não encontrada para o alias.");
-        }
+        java.security.PrivateKey privKey = loadPrivateKeyForUser(username, ksPath, ksPass);
+        java.security.PublicKey targetPubKey = CryptoService.getPublicKeyFromCertBytes(targetCertBytes);
 
-        // 2. Extrair a Chave PÚBLICA do utilizador alvo a partir dos bytes
-        java.security.cert.CertificateFactory certFactory = java.security.cert.CertificateFactory.getInstance("X.509");
-        Certificate targetCert = certFactory.generateCertificate(new java.io.ByteArrayInputStream(targetCertBytes));
-        java.security.PublicKey targetPubKey = targetCert.getPublicKey();
-
-        // 3. Cifras WRAP e UNWRAP
-        Cipher unwrapCipher = Cipher.getInstance("RSA");
-        unwrapCipher.init(Cipher.UNWRAP_MODE, privKey);
-
-        Cipher wrapCipher = Cipher.getInstance("RSA");
-        wrapCipher.init(Cipher.WRAP_MODE, targetPubKey);
-
-        // 4. Para cada secção enviada: Unwrap -> Wrap
         for (java.util.Map.Entry<String, byte[]> entry : keysToWrap.entrySet()) {
-            java.security.Key rawSimetricKey = unwrapCipher.unwrap(entry.getValue(), "AES", Cipher.SECRET_KEY);
-            byte[] newWrappedBytes = wrapCipher.wrap(rawSimetricKey);
+            SecretKey rawKey = CryptoService.unwrapKeyRSA(entry.getValue(), privKey);
+            byte[] newWrappedBytes = CryptoService.wrapKeyRSA(rawKey, targetPubKey);
             newWrappedKeys.put(entry.getKey(), newWrappedBytes);
         }
 
@@ -549,28 +515,14 @@ public class SpertaClient {
 
         // === E2E DESCIFRAR ===
         // 1. Extrair chave privada do cliente
-        java.security.KeyStore ks = java.security.KeyStore.getInstance("PKCS12");
-        try (java.io.FileInputStream fis = new java.io.FileInputStream(ksPath)) {
-            ks.load(fis, ksPass.toCharArray());
-        }
-        String usedAlias = username;
-        if (!ks.containsAlias(usedAlias)) {
-            java.util.Enumeration<String> aliases = ks.aliases();
-            if (aliases.hasMoreElements()) {
-                usedAlias = aliases.nextElement();
-            }
-        }
-        java.security.Key privKey = ks.getKey(usedAlias, ksPass.toCharArray());
-
-        Cipher rsaUnwrap = Cipher.getInstance("RSA");
-        rsaUnwrap.init(Cipher.UNWRAP_MODE, privKey);
+        java.security.PrivateKey privKey = loadPrivateKeyForUser(username, ksPath, ksPass);
 
         // 2. Desembrulhar as chaves AES para uso real
         HashMap<String, SecretKey> aesKeys = new HashMap<>();
         if (wrappedKeysMap != null) {
             for (java.util.Map.Entry<String, byte[]> entry : wrappedKeysMap.entrySet()) {
                 try {
-                    SecretKey aesKey = (SecretKey) rsaUnwrap.unwrap(entry.getValue(), "AES", Cipher.SECRET_KEY);
+                    SecretKey aesKey = CryptoService.unwrapKeyRSA(entry.getValue(), privKey);
                     aesKeys.put(entry.getKey(), aesKey);
                 } catch (Exception e) {
                     System.err.println("Falha ao desembrulhar chave da secção " + entry.getKey() + ": " + e.getMessage());
@@ -579,7 +531,6 @@ public class SpertaClient {
         }
 
         // 3. Substituir os valores cifrados no texto por texto claro
-        Cipher aesDecCipher = Cipher.getInstance("AES");
         StringBuilder decryptedContent = new StringBuilder();
         Scanner sc = new Scanner(contentStr);
 
@@ -598,10 +549,9 @@ public class SpertaClient {
 
                     if (k != null && isBase64(encryptedVal)) {
                         try {
-                            aesDecCipher.init(Cipher.DECRYPT_MODE, k);
                             byte[] dec = java.util.Base64.getDecoder().decode(encryptedVal);
-                            byte[] decodedValue = aesDecCipher.doFinal(dec);
-                            parts[1] = new String(decodedValue, "UTF-8");
+                            String decodedValue = CryptoService.decryptAES(dec, k);
+                            parts[1] = decodedValue;
                             decryptedContent.append(String.join(",", parts)).append("\n");
                         } catch (Exception e) {
                             decryptedContent.append(line).append("\n");
@@ -621,10 +571,9 @@ public class SpertaClient {
                     SecretKey k = aesKeys.get(sec);
                     if (k != null && isBase64(encryptedVal)) {
                         try {
-                            aesDecCipher.init(Cipher.DECRYPT_MODE, k);
                             byte[] dec = java.util.Base64.getDecoder().decode(encryptedVal);
-                            byte[] decodedValue = aesDecCipher.doFinal(dec);
-                            decryptedContent.append(devId).append(":").append(new String(decodedValue, "UTF-8")).append("\n");
+                            String decodedValue = CryptoService.decryptAES(dec, k);
+                            decryptedContent.append(devId).append(":").append(decodedValue).append("\n");
                         } catch (Exception e) {
                             decryptedContent.append(line).append("\n");
                         }

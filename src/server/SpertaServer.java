@@ -5,32 +5,26 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
-import java.net.ServerSocket;
-import java.net.Socket;
 import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLServerSocketFactory;
 import javax.net.ssl.SSLSocket;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Scanner;
-import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
-import javax.crypto.Cipher;
-import javax.crypto.SecretKey;
-import javax.crypto.SecretKeyFactory;
-import javax.crypto.spec.PBEKeySpec;
-import javax.crypto.spec.PBEParameterSpec;
+import utils.CryptoService;
 
 public class SpertaServer {
     
-    //gestao de concorrencia
+    // Concurrency control: per-file read/write reentrant locks
     private static final ConcurrentHashMap<String, ReentrantReadWriteLock> fileLocks = new ConcurrentHashMap<>();
     private static String cipherPassword;
     private static byte[] pbeSalt;
@@ -46,8 +40,7 @@ public class SpertaServer {
             pbeSalt = Files.readAllBytes(saltFile.toPath());
         } else {
             saltFile.getParentFile().mkdirs();
-            pbeSalt = new byte[16];
-            new SecureRandom().nextBytes(pbeSalt);
+            pbeSalt = CryptoService.generateRandomSalt();
             Files.write(saltFile.toPath(), pbeSalt);
         }
     }
@@ -57,49 +50,12 @@ public class SpertaServer {
         if (!f.exists() || f.length() == 0) return null;
         
         byte[] fileData = Files.readAllBytes(Paths.get(caminho));
-        
-        // PBEWithHmacSHA256AndAES_128 requires IV. We store/read the IV appended to the file.
-        // We will assume the first 16 bytes is the IV
-        if (fileData.length < 16) return null; // Too short to even have an IV
-        
-        byte[] iv = new byte[16];
-        System.arraycopy(fileData, 0, iv, 0, 16);
-        byte[] actualData = new byte[fileData.length - 16];
-        System.arraycopy(fileData, 16, actualData, 0, actualData.length);
-
-        PBEKeySpec keySpec = new PBEKeySpec(cipherPassword.toCharArray());
-        SecretKeyFactory kf = SecretKeyFactory.getInstance("PBEWithHmacSHA256AndAES_128");
-        SecretKey key = kf.generateSecret(keySpec);
-        
-        // Setup parameters using IV and salt
-        javax.crypto.spec.IvParameterSpec ivSpec = new javax.crypto.spec.IvParameterSpec(iv);
-        PBEParameterSpec paramSpec = new PBEParameterSpec(pbeSalt, 100, ivSpec);
-
-        Cipher c = Cipher.getInstance("PBEWithHmacSHA256AndAES_128");
-        c.init(Cipher.DECRYPT_MODE, key, paramSpec);
-        return c.doFinal(actualData);
+        if (fileData.length < 16) return null;
+        return CryptoService.decryptPBE(fileData, cipherPassword, pbeSalt);
     }
 
-    //servidor cifra os ficheiros
     public static void escreverFicheiroCifrado(String caminho, byte[] textoLimpo) throws Exception {
-        PBEKeySpec keySpec = new PBEKeySpec(cipherPassword.toCharArray());
-        SecretKeyFactory kf = SecretKeyFactory.getInstance("PBEWithHmacSHA256AndAES_128");
-        SecretKey key = kf.generateSecret(keySpec);
-        
-        // Generate a random IV for every file write
-        byte[] iv = new byte[16];
-        new SecureRandom().nextBytes(iv);
-        javax.crypto.spec.IvParameterSpec ivSpec = new javax.crypto.spec.IvParameterSpec(iv);
-        PBEParameterSpec paramSpec = new PBEParameterSpec(pbeSalt, 100, ivSpec);
-
-        Cipher c = Cipher.getInstance("PBEWithHmacSHA256AndAES_128");
-        c.init(Cipher.ENCRYPT_MODE, key, paramSpec);
-        byte[] cifrado = c.doFinal(textoLimpo);
-        
-        // Prepend IV to the encrypted data
-        byte[] finalFileData = new byte[16 + cifrado.length];
-        System.arraycopy(iv, 0, finalFileData, 0, 16);
-        System.arraycopy(cifrado, 0, finalFileData, 16, cifrado.length);
+        byte[] finalFileData = CryptoService.encryptPBE(textoLimpo, cipherPassword, pbeSalt);
         
         File f = new File(caminho);
         if (!f.getParentFile().exists()) f.getParentFile().mkdirs();
@@ -127,33 +83,28 @@ public class SpertaServer {
             System.exit(1);
         }
 
-        String cipherPassword = args[1];
+        String cipherPasswordArg = args[1];
         String keystorePath = args[2];
         String keystorePassword = args[3];
 
         try {
-            initPBE(cipherPassword);
+            initPBE(cipherPasswordArg);
         } catch (Exception e) {
             System.err.println("Failed to initialize PBE engine: " + e.getMessage());
             System.exit(1);
         }
 
-        //Socket SSL TLS, Keystrores e Truststores
-        // Configurar as propriedades de sistema para o SSL/TLS
+        // Configure system properties for SSL/TLS handshake
         System.setProperty("javax.net.ssl.keyStore", keystorePath);
         System.setProperty("javax.net.ssl.keyStorePassword", keystorePassword);
-        // Opcional: Se ver detalhes do handshake SSL (para debug), descomentar
-        // a linha abaixo:
-        // System.setProperty("javax.net.debug", "ssl");
 
         String referenceClientPath = loadExpectedClientPath();
         if (referenceClientPath == null) {
-            System.out.println("WARNING: attestation.txt não encontrado. Atestação desativada.");
+            System.out.println("WARNING: attestation.txt not found. Client attestation disabled.");
         } else {
-            System.out.println("Atestação ativa com jar de referência: " + referenceClientPath);
+            System.out.println("Attestation active with reference binary: " + referenceClientPath);
         }
 
-        //Socket SSL TLS
         try {
             SSLServerSocketFactory sslSrvFact = (SSLServerSocketFactory) SSLServerSocketFactory.getDefault();
             SSLServerSocket sSoc = (SSLServerSocket) sslSrvFact.createServerSocket(port);
@@ -181,13 +132,12 @@ public class SpertaServer {
         try (Scanner sc = new Scanner(file)) {
             while (sc.hasNextLine()) {
                 String line = sc.nextLine().trim();
-                // O texto a procurar muda para o novo formato ("SpertaClient:/path/...")
                 if (line.startsWith("SpertaClient:")) {
                     return line.substring("SpertaClient:".length()).trim();
                 }
             }
         } catch (Exception e) {
-            System.err.println("Erro a ler attestation.txt: " + e.getMessage());
+            System.err.println("Error reading attestation.txt: " + e.getMessage());
         }
         return null;
     }
@@ -201,6 +151,8 @@ public class SpertaServer {
             this.referenceClientPath = referenceClientPath;
         }
 
+        @Override
+        @SuppressWarnings("unchecked")
         public void run() {
             ObjectInputStream inStream = null;
             ObjectOutputStream outStream = null;
@@ -209,14 +161,13 @@ public class SpertaServer {
                 outStream = new ObjectOutputStream(socket.getOutputStream());
                 inStream = new ObjectInputStream(socket.getInputStream());
 
-                // PASSO 1: Atestação
+                // STEP 1: Binary Attestation
                 if (referenceClientPath != null && !handleAttestation(inStream, outStream)) {
                     socket.close();
                     return;
                 }
 
-                // PASSO 2: Autenticação com retry
-                // *** LOOP — continua até autenticar com sucesso ***
+                // STEP 2: Authentication Loop with Retry
                 String username = null;
                 while (true) {
                     String user = (String) inStream.readObject();
@@ -226,7 +177,7 @@ public class SpertaServer {
                     int authResult = authenticateUser(user, pass, inStream, outStream);
 
                     if (authResult == 0) {
-                        // WRONG-PWD — envia resposta e continua o loop
+                        // WRONG-PWD
                         outStream.writeObject(Integer.valueOf(0));
                         outStream.flush();
                         System.out.println("WRONG-PWD: " + user);
@@ -240,18 +191,18 @@ public class SpertaServer {
                         break;
 
                     } else if (authResult == 2) {
-                        // OK-NEW-USER — certificado já foi tratado dentro do authenticateUser
+                        // OK-NEW-USER (certificate handled within authenticateUser)
                         System.out.println("OK-NEW-USER: " + user);
                         username = user;
                         break;
                     }
                 }
 
-                // PASSO 3: Receber comandos
+                // STEP 3: Message / Command Processing Loop
                 receiveMessages(inStream, outStream, username);
 
             } catch (IOException | ClassNotFoundException e) {
-                e.printStackTrace();
+                System.out.println("Connection closed for client: " + (username != null ? username : "unauthenticated"));
             } catch (Exception e) {
                 e.printStackTrace();
             }
@@ -260,38 +211,30 @@ public class SpertaServer {
         private boolean handleAttestation(ObjectInputStream in, ObjectOutputStream out)
                 throws IOException {
 
-            // 1. Gerar e enviar o nonce (8 bytes)
+            // 1. Generate and send 8-byte challenge nonce
             SecureRandom random = new SecureRandom();
             long nonce = random.nextLong();
             out.writeLong(nonce);
             out.flush();
 
             try {
-                // 2. Receber a hash do cliente
+                // 2. Receive client calculated hash
                 byte[] clientHash = (byte[]) in.readObject();
 
-                // 3. Ler cópia de referência do Jar localmente TODO mudar o caminho do file no
-                // attestation.txt para o Jar
+                // 3. Read reference binary
                 File referenceFile = new File(referenceClientPath);
                 if (!referenceFile.exists()) {
-                    System.err.println("Ficheiro de referência do cliente não encontrado: " + referenceClientPath);
+                    System.err.println("Reference executable not found: " + referenceClientPath);
                     out.writeObject("NOK-ATTEST");
                     out.flush();
                     return false;
                 }
                 byte[] referenceJarBytes = Files.readAllBytes(referenceFile.toPath());
 
-                // 4. Calcular a hash local com o mesmo nonce
-                ByteBuffer buffer = ByteBuffer.allocate(Long.BYTES);
-                buffer.putLong(nonce);
-                byte[] nonceBytes = buffer.array();
+                // 4. Compute server hash using CryptoService
+                byte[] serverHash = CryptoService.computeHashWithNonce(nonce, referenceJarBytes);
 
-                MessageDigest digest = MessageDigest.getInstance("SHA-256");
-                digest.update(nonceBytes);
-                digest.update(referenceJarBytes);
-                byte[] serverHash = digest.digest();
-
-                // 5. Comparar
+                // 5. Compare digests
                 if (Arrays.equals(clientHash, serverHash)) {
                     out.writeObject("OK-ATTEST");
                     out.flush();
@@ -304,16 +247,17 @@ public class SpertaServer {
                     return false;
                 }
             } catch (Exception e) {
-                e.printStackTrace();
+                System.err.println("Attestation error: " + e.getMessage());
                 try {
                     out.writeObject("NOK-ATTEST");
                     out.flush();
-                } catch (Exception ignores) {
+                } catch (Exception ignored) {
                 }
                 return false;
             }
         }
 
+        @SuppressWarnings("unchecked")
         private void receiveMessages(ObjectInputStream inStream, ObjectOutputStream outStream,
                 String username) {
             try {
@@ -331,7 +275,7 @@ public class SpertaServer {
                             try {
                                 keys = (java.util.HashMap<String, byte[]>) inStream.readObject();
                             } catch (Exception e) {
-                                System.err.println("Erro ao receber chaves de secção: " + e.getMessage());
+                                System.err.println("Error receiving section keys: " + e.getMessage());
                             }
                             response = createHouse(parts[1], username, keys);
                         } else {
@@ -358,14 +302,14 @@ public class SpertaServer {
                             
                             if (response.equals("OK")) {
                                 try {
-                                    // 1. Ler o certificado do utilizador alvo
+                                    // 1. Read target user's certificate
                                     File certFile = new File("data/certs/" + targetUser + ".cert");
                                     byte[] targetCertBytes = null;
                                     if (certFile.exists()) {
                                         targetCertBytes = Files.readAllBytes(certFile.toPath());
                                     }
                                     
-                                    // 2. Ler as chaves da secção pedidas cifradas pela chave do cur User
+                                    // 2. Read caller's wrapped section keys
                                     java.util.HashMap<String, byte[]> keysToWrap = new java.util.HashMap<>();
                                     if (section.equalsIgnoreCase("all")) {
                                         String[] secs = {"E", "G", "L", "M", "P", "S"};
@@ -378,12 +322,12 @@ public class SpertaServer {
                                         if (kf.exists()) keysToWrap.put(section.toUpperCase(), Files.readAllBytes(kf.toPath()));
                                     }
                                     
-                                    // 3. Enviar para o cliente descodificar e voltar a embrulhar
+                                    // 3. Dispatch to client to decrypt and re-wrap for target user
                                     Object[] e2eData = new Object[]{"E2E_ADD", keysToWrap, targetCertBytes};
                                     outStream.writeObject(e2eData);
                                     outStream.flush();
                                     
-                                    // 4. Receber as novas chaves
+                                    // 4. Persist re-wrapped keys
                                     Object resp = inStream.readObject();
                                     if (resp instanceof java.util.HashMap) {
                                         java.util.HashMap<String, byte[]> newKeys = (java.util.HashMap<String, byte[]>) resp;
@@ -394,12 +338,12 @@ public class SpertaServer {
                                         }
                                         response = "OK - Target user " + targetUser + " now has section key(s).";
                                     } else {
-                                        response = "NOK - Falha ao receber as chaves renvolvidas (E2E).";
+                                        response = "NOK - Failed to receive re-wrapped keys (E2E).";
                                     }
                                     
                                 } catch (Exception e) {
-                                    System.err.println("Erro no E2E_ADD: " + e.getMessage());
-                                    response = "NOK - Erro interno no E2E_ADD.";
+                                    System.err.println("Error during E2E_ADD: " + e.getMessage());
+                                    response = "NOK - Internal error in E2E_ADD.";
                                 }
                             }
                             
@@ -413,13 +357,13 @@ public class SpertaServer {
                         }
 
                     } else if (command.equals("GET_KEY")) {
-                        // Formato: GET_KEY <hm> <sec>
+                        // Format: GET_KEY <hm> <sec>
                         if (parts.length >= 3) {
                             String houseName = parts[1];
                             String section = parts[2].toUpperCase();
                             File kf = new File("data/keys/key." + houseName + "." + section + "." + username);
                             if (kf.exists()) {
-                                byte[] keyBytes = java.nio.file.Files.readAllBytes(kf.toPath());
+                                byte[] keyBytes = Files.readAllBytes(kf.toPath());
                                 outStream.writeObject(keyBytes);
                             } else {
                                 outStream.writeObject("NO_KEY");
@@ -439,7 +383,6 @@ public class SpertaServer {
                         outStream.flush();
 
                     } else if (command.equals("RT")) {
-                        // RT não envia String simples — tem método próprio
                         if (parts.length >= 2) {
                             handleRT(parts[1], username, outStream);
                         } else {
@@ -448,7 +391,6 @@ public class SpertaServer {
                         }
 
                     } else if (command.equals("RH")) {
-                        // RH não envia String simples — tem método próprio
                         if (parts.length >= 3) {
                             handleRH(parts[1], parts[2], username, outStream);
                         } else {
@@ -481,7 +423,6 @@ public class SpertaServer {
                     return;
                 }
 
-                // verificar antes de ler ***
                 if (!verifyFileHash(housePath)) {
                     System.out.println("NOK-INTEGRITY");
                     System.exit(1);
@@ -489,25 +430,22 @@ public class SpertaServer {
 
                 StringBuilder content = new StringBuilder();
                 boolean hasPermission = false;
-                java.util.List<String> accessibleSections = new java.util.ArrayList<>();
+                List<String> accessibleSections = new ArrayList<>();
 
                 try {
                     byte[] decBytes = lerFicheiroCifrado(housePath);
                     try (Scanner sc = new Scanner(new java.io.ByteArrayInputStream(decBytes))) {
-                        // Primeira linha é o dono
                         String owner = sc.hasNextLine() ? sc.nextLine().trim() : "";
 
                         if (owner.equals(username)) {
                             hasPermission = true;
                         }
 
-                        // Ler cada secção
                         while (sc.hasNextLine()) {
                             String line = sc.nextLine().trim();
                             if (line.isEmpty())
                                 continue;
 
-                            // Verificar se o utilizador tem permissão nesta secção
                             boolean canAccessSection = owner.equals(username);
                             if (!canAccessSection) {
                                 int bracketStart = line.lastIndexOf('[');
@@ -527,13 +465,11 @@ public class SpertaServer {
                             if (!canAccessSection)
                                 continue;
                                 
-                            // O utilizador tem permissão, guarda a secção para lhe devolvermos a chave depois
                             String secName = line.substring(0, line.indexOf(':'));
                             if (!accessibleSections.contains(secName)) {
                                 accessibleSections.add(secName);
                             }
 
-                            // Extrair dispositivos e valores
                             int parenStart = line.indexOf('(');
                             int parenEnd = line.indexOf(')');
                             if (parenStart == -1 || parenEnd <= parenStart)
@@ -543,7 +479,6 @@ public class SpertaServer {
                             if (devicesStr.isEmpty())
                                 continue;
 
-                            // Cada dispositivo
                             for (String dev : devicesStr.split(",")) {
                                 dev = dev.trim();
                                 if (dev.contains("-")) {
@@ -580,15 +515,14 @@ public class SpertaServer {
                     return;
                 }
 
-                // E2E: Obter as chaves das secções às quais o utilizador teve acesso
+                // Return wrapped section keys accessible to user
                 java.util.HashMap<String, byte[]> keysMap = new java.util.HashMap<>();
                 for (String s : accessibleSections) {
                     File kf = new File("data/keys/key." + houseName + "." + s + "." + username);
                     if (kf.exists()) keysMap.put(s, Files.readAllBytes(kf.toPath()));
                 }
 
-                // Enviar OK + Chaves + tamanho + bytes
-                byte[] data = content.toString().getBytes("UTF-8");
+                byte[] data = content.toString().getBytes(StandardCharsets.UTF_8);
                 outStream.writeObject(new Object[]{"OK", keysMap});
                 outStream.writeObject((long) data.length);
                 outStream.write(data);
@@ -610,20 +544,17 @@ public class SpertaServer {
             houseReadLock.lock();
 
             try {
-                // Verificar se a casa existe
                 if (!houseFile.exists()) {
                     outStream.writeObject("NOHM");
                     outStream.flush();
                     return;
                 }
 
-                // verificar antes de ler a casa
                 if (!verifyFileHash(housePath)) {
                     System.out.println("NOK-INTEGRITY");
                     System.exit(1);
                 }
 
-                // Verificar se o dispositivo existe e se o utilizador tem permissao
                 boolean deviceFound = false;
                 boolean hasPermission = false;
 
@@ -708,7 +639,6 @@ public class SpertaServer {
                         return;
                     }
 
-                    // verificar antes de ler o log
                     if (!verifyFileHash(logFilePath)) {
                         System.out.println("NOK-INTEGRITY");
                         System.exit(1);
@@ -718,16 +648,15 @@ public class SpertaServer {
                     try {
                         data = lerFicheiroCifrado(logFilePath);
                     } catch (Exception e) {
-                        System.err.println("Erro a ler log cifrado: " + e.getMessage());
+                        System.err.println("Error reading encrypted log file: " + e.getMessage());
                         outStream.writeObject("NOK");
                         outStream.flush();
                         return;
                     }
 
-                    // E2E: Obter as chaves das secções às quais o utilizador tem acesso
                     java.util.HashMap<String, byte[]> keysMap = new java.util.HashMap<>();
                     File kf = new File("data/keys/key." + houseName + "." + section + "." + username);
-                    if (kf.exists()) keysMap.put(section, java.nio.file.Files.readAllBytes(kf.toPath()));
+                    if (kf.exists()) keysMap.put(section, Files.readAllBytes(kf.toPath()));
 
                     outStream.writeObject(new Object[]{"OK", keysMap});
                     outStream.writeObject((long) data.length);
@@ -753,14 +682,11 @@ public class SpertaServer {
                 if (!houseFile.exists()) {
                     return "NOHM";
                 }
-                // verificar antes de ler
                 if (!verifyFileHash(houseFilePath)) {
                     System.out.println("NOK-INTEGRITY");
                     System.exit(1);
                 }
 
-                // Validação do Cliente (E2E): O valor não é validado pelo servidor. Vem Cifrado (Base64).
-                // Mas, por segurança, rejeitamos nulos ou vazios
                 if (valueStr == null || valueStr.trim().isEmpty()) {
                     return "NOK";
                 }
@@ -782,11 +708,8 @@ public class SpertaServer {
 
                         while (sc.hasNextLine()) {
                             String line = sc.nextLine();
-                            // Check if this line contains the device
-                            // Line format: Section:(d1-s1,d2-s2)[u1,u2]
                             if (line.contains(":" + deviceId + "-") || line.contains("," + deviceId + "-")
                                     || line.contains("(" + deviceId + "-")) {
-                                // Start parsing to be precise
                                 int startP = line.indexOf('(');
                                 int endP = line.lastIndexOf(')');
                                 if (startP != -1 && endP > startP) {
@@ -801,7 +724,6 @@ public class SpertaServer {
                                             foundInLine = true;
                                             deviceFound = true;
 
-                                            // Check permission if not owner
                                             if (!hasPermission) {
                                                 String suffix = line.substring(endP + 1).trim();
                                                 if (suffix.startsWith("[") && suffix.endsWith("]")) {
@@ -816,11 +738,9 @@ public class SpertaServer {
                                             }
 
                                             if (hasPermission) {
-                                                // Update value
                                                 newContent.append(deviceId).append("-").append(valueStr);
                                                 updated = true;
                                             } else {
-                                                // Keep old value
                                                 newContent.append(dev);
                                             }
                                         } else {
@@ -860,22 +780,21 @@ public class SpertaServer {
                         for (String l : lines) {
                             sb.append(l).append("\n");
                         }
-                        escreverFicheiroCifrado(houseFilePath, sb.toString().getBytes("UTF-8"));
+                        escreverFicheiroCifrado(houseFilePath, sb.toString().getBytes(StandardCharsets.UTF_8));
                     } catch (Exception e) {
                         e.printStackTrace();
                         return "Error securely writing to house file.";
                     }
-                    // guardar hash da casa depois de escrever
+
                     try {
                         saveFileHash(houseFilePath);
                     } catch (Exception e) {
-                        System.err.println("Erro a guardar hash: " + e.getMessage());
+                        System.err.println("Error saving house hash: " + e.getMessage());
                     }
 
-                    // Escrever no log CSV do dispositivo
                     String section = String.valueOf(deviceId.charAt(0)).toUpperCase();
                     File logDir = new File("data/logs/" + houseName + "/" + section);
-                    logDir.mkdirs(); // cria as pastas se não existirem
+                    logDir.mkdirs();
 
                     String logFilePath = logDir.getPath() + "/" + deviceId + ".csv";
                     File logFile = new File(logFilePath);
@@ -887,22 +806,20 @@ public class SpertaServer {
                         StringBuilder logContent = new StringBuilder();
 
                         if (!isNewFile) {
-                            // verify integrity first
                             if (!verifyFileHash(logFilePath)) {
                                 System.out.println("NOK-INTEGRITY-LOG");
                                 System.exit(1);
                             }
                             try {
                                 byte[] existingBytes = lerFicheiroCifrado(logFilePath);
-                                logContent.append(new String(existingBytes, "UTF-8"));
+                                logContent.append(new String(existingBytes, StandardCharsets.UTF_8));
                             } catch (Exception e) {
-                                System.err.println("Erro a ler log cifrado antigo: " + e.getMessage());
+                                System.err.println("Error reading existing encrypted log: " + e.getMessage());
                             }
                         } else {
                             logContent.append("device,value,timestamp\n");
                         }
 
-                        // Appending the new log line
                         logContent.append(deviceId).append(",")
                                 .append(valueStr).append(",")
                                 .append(java.time.LocalDateTime.now()
@@ -911,15 +828,15 @@ public class SpertaServer {
                                 .append("\n");
 
                         try {
-                            escreverFicheiroCifrado(logFilePath, logContent.toString().getBytes("UTF-8"));
+                            escreverFicheiroCifrado(logFilePath, logContent.toString().getBytes(StandardCharsets.UTF_8));
                         } catch (Exception e) {
-                            System.err.println("Erro a escrever log cifrado: " + e.getMessage());
+                            System.err.println("Error writing encrypted log: " + e.getMessage());
                         }
 
                         try {
                             saveFileHash(logFilePath);
                         } catch (Exception e) {
-                            System.err.println("Erro a guardar hash do log: " + e.getMessage());
+                            System.err.println("Error saving log hash: " + e.getMessage());
                         }
                     } finally {
                         logWriteLock.unlock();
@@ -945,7 +862,6 @@ public class SpertaServer {
                 if (!houseFile.exists()) {
                     return "NOHM";
                 }
-                // verificar antes de ler
                 if (!verifyFileHash(houseFilePath)) {
                     System.out.println("NOK-INTEGRITY");
                     System.exit(1);
@@ -958,7 +874,6 @@ public class SpertaServer {
                 try {
                     byte[] decBytes = lerFicheiroCifrado(houseFilePath);
                     try (Scanner sc = new Scanner(new java.io.ByteArrayInputStream(decBytes))) {
-                        // Check owner first line
                         String ownerLine = sc.hasNextLine() ? sc.nextLine().trim() : "";
                         lines.add(ownerLine);
 
@@ -974,7 +889,7 @@ public class SpertaServer {
 
                                 if (contentStart > 0 && contentEnd >= contentStart) {
                                     String content = line.substring(contentStart, contentEnd).trim();
-                                    String suffix = line.substring(contentEnd + 1).trim(); // Keep permissions part
+                                    String suffix = line.substring(contentEnd + 1).trim();
                                     if (suffix.isEmpty())
                                         suffix = "[]";
 
@@ -984,15 +899,13 @@ public class SpertaServer {
                                         String[] devices = content.split(",");
                                         int maxId = 0;
                                         for (String dev : devices) {
-                                            // Format: E1-0 (no permissions inside now)
                                             String idPart = dev.split("-")[0].trim();
                                             if (idPart.startsWith(section)) {
                                                 try {
                                                     int num = Integer.parseInt(idPart.substring(section.length()));
                                                     if (num > maxId)
                                                         maxId = num;
-                                                } catch (NumberFormatException e) {
-                                                    // ignore malformed ID
+                                                } catch (NumberFormatException ignored) {
                                                 }
                                             }
                                         }
@@ -1025,16 +938,15 @@ public class SpertaServer {
                         for (String l : lines) {
                             sb.append(l).append("\n");
                         }
-                        escreverFicheiroCifrado(houseFilePath, sb.toString().getBytes("UTF-8"));
+                        escreverFicheiroCifrado(houseFilePath, sb.toString().getBytes(StandardCharsets.UTF_8));
                     } catch (Exception e) {
                         e.printStackTrace();
                         return "Error securely writing to house file.";
                     }
-                    // guardar hash apos escrever
                     try {
                         saveFileHash(houseFilePath);
                     } catch (Exception e) {
-                        System.err.println("Erro a guardar hash: " + e.getMessage());
+                        System.err.println("Error saving hash: " + e.getMessage());
                     }
                     System.out.println("Registered device " + newDeviceId + " in " + houseName);
                     return "OK";
@@ -1073,7 +985,6 @@ public class SpertaServer {
                 try {
                     byte[] decBytes = lerFicheiroCifrado(houseFilePath);
                     try (Scanner sc = new Scanner(new java.io.ByteArrayInputStream(decBytes))) {
-                        // Check owner first line - SAFE READ
                         String ownerLine = "";
                         if (sc.hasNextLine()) {
                             ownerLine = sc.nextLine().trim();
@@ -1086,7 +997,6 @@ public class SpertaServer {
 
                         while (sc.hasNextLine()) {
                             String line = sc.nextLine();
-                            // Check format validity
                             if (!line.contains(":")) {
                                 lines.add(line);
                                 continue;
@@ -1099,7 +1009,7 @@ public class SpertaServer {
                                 int contentEnd = line.lastIndexOf(')');
 
                                 if (contentEnd != -1) {
-                                    String prefix = line.substring(0, contentEnd + 1); // "Section:(...)"
+                                    String prefix = line.substring(0, contentEnd + 1);
                                     String suffix = line.substring(contentEnd + 1).trim();
                                     if (suffix.isEmpty())
                                         suffix = "[]";
@@ -1144,12 +1054,12 @@ public class SpertaServer {
                         for (String l : lines) {
                             sb.append(l).append("\n");
                         }
-                        escreverFicheiroCifrado(houseFilePath, sb.toString().getBytes("UTF-8"));
+                        escreverFicheiroCifrado(houseFilePath, sb.toString().getBytes(StandardCharsets.UTF_8));
                         
                         try {
                             saveFileHash(houseFilePath);
                         } catch (Exception e) {
-                            System.err.println("Erro a guardar hash: " + e.getMessage());
+                            System.err.println("Error saving hash: " + e.getMessage());
                         }
                     } catch (Exception e) {
                         e.printStackTrace();
@@ -1173,7 +1083,6 @@ public class SpertaServer {
                 homesDir.mkdirs();
             }
 
-            // Criar pasta de chaves se não existir
             File keysDir = new File("data/keys");
             if (!keysDir.exists()) {
                 keysDir.mkdirs();
@@ -1191,7 +1100,6 @@ public class SpertaServer {
                 }
 
                 try {
-                    // 1. Guardar a casa
                     StringBuilder sb = new StringBuilder();
                     sb.append(owner).append("\n");
                     sb.append("E:()[]\n");
@@ -1200,29 +1108,27 @@ public class SpertaServer {
                     sb.append("M:()[]\n");
                     sb.append("P:()[]\n");
                     sb.append("S:()[]\n");
-                    escreverFicheiroCifrado(houseFilePath, sb.toString().getBytes("UTF-8"));
+                    escreverFicheiroCifrado(houseFilePath, sb.toString().getBytes(StandardCharsets.UTF_8));
                     System.out.println("House " + houseName + " created securely for owner " + owner);
                     
-                    // 2. Guardar as chaves embrulhadas no formato key.<hm>.<s>.<owner>
                     if (sectionKeys != null && !sectionKeys.isEmpty()) {
                         for (java.util.Map.Entry<String, byte[]> entry : sectionKeys.entrySet()) {
                             String s = entry.getKey();
                             byte[] keyBytes = entry.getValue();
                             String keyPath = "data/keys/key." + houseName + "." + s + "." + owner;
-                            java.nio.file.Files.write(java.nio.file.Paths.get(keyPath), keyBytes);
+                            Files.write(Paths.get(keyPath), keyBytes);
                         }
-                        System.out.println("Section keys para casa " + houseName + " criadas com sucesso (owner: " + owner + ").");
+                        System.out.println("Section keys for house " + houseName + " initialized successfully for owner: " + owner);
                     }
                 } catch (Exception e) {
                     System.err.println("Error creating house file: " + e.getMessage());
                     return "NOK";
                 }
 
-                // guardar hash apos criar o ficheiro
                 try {
                     saveFileHash(houseFilePath);
                 } catch (Exception e) {
-                    System.err.println("Erro a guardar hash: " + e.getMessage());
+                    System.err.println("Error saving hash: " + e.getMessage());
                 }
 
                 return "OK";
@@ -1250,7 +1156,7 @@ public class SpertaServer {
                         }
                     }
                 } catch (Exception e) {
-                    System.err.println("Erro ao ler users.txt cifrado no userExists: " + e.getMessage());
+                    System.err.println("Error reading encrypted users.txt in userExists: " + e.getMessage());
                 }
                 return false;
             }
@@ -1264,12 +1170,9 @@ public class SpertaServer {
                 if (!userFile.getParentFile().exists())
                     userFile.getParentFile().mkdirs();
                 if (!userFile.exists()) {
-                    // Apenas criar se não existe
-                    // Só gravamos "vazio" cifrado para depois lhe darmos write append limpo
                     escreverFicheiroCifrado("data/users.txt", new byte[0]);
                 }
                 
-                // verificar antes de ler
                 if (!verifyFileHash("data/users.txt")) {
                     System.out.println("NOK-INTEGRITY");
                     System.exit(1);
@@ -1291,8 +1194,6 @@ public class SpertaServer {
                             if (parts.length >= 1 && parts[0].equals(username)) {
                                 foundUser = true;
                                 if (parts.length == 3) {
-                                    //Autenticaçao de clientes
-                                    // Formato correto: userid:hash:salt
                                     String storedHash = parts[1];
                                     String storedSalt = parts[2];
                                     String computedHash = hashPassword(password, storedSalt);
@@ -1307,72 +1208,51 @@ public class SpertaServer {
                     return passwordMatch ? 1 : 0;
 
                 } else {
-                    // Servidore protege a confidencialidade das passwords dos utilizadores.
-                    // Novo utilizador — gerar hash+salt e pedir certificado
-                    String salt = generateSalt();
+                    byte[] saltBytes = CryptoService.generateRandomSalt();
+                    String salt = Base64.getEncoder().encodeToString(saltBytes);
                     String hash = hashPassword(password, salt);
 
                     String newUserLine = username + ":" + hash + ":" + salt + System.lineSeparator();
                     if (decBytes == null) decBytes = new byte[0];
-                    byte[] newBytes = newUserLine.getBytes("UTF-8");
+                    byte[] newBytes = newUserLine.getBytes(StandardCharsets.UTF_8);
                     byte[] finalData = new byte[decBytes.length + newBytes.length];
                     System.arraycopy(decBytes, 0, finalData, 0, decBytes.length);
                     System.arraycopy(newBytes, 0, finalData, decBytes.length, newBytes.length);
 
-                    // Escrever ficheiro cifrado em vez do antigo FileOutputStream 
                     escreverFicheiroCifrado("data/users.txt", finalData);
                     System.out.println("New user registered: " + username);
                     
-                    // guardar hash após escrever (O SHA256 é feito no ficheiro CIFRADO)
                     saveFileHash("data/users.txt");
                     
-                    // Pedir certificado ao cliente
                     out.writeObject("SEND-CERT");
                     out.flush();
 
-                    // Receber o certificado (array de bytes)
                     byte[] certBytes = (byte[]) in.readObject();
 
-                    // Guardar o certificado
                     File certDir = new File("data/certs");
                     certDir.mkdirs();
                     File certFile = new File(certDir, username + ".cert");
                     try (FileOutputStream fos = new FileOutputStream(certFile)) {
                         fos.write(certBytes);
                     }
-                    System.out.println("Certificate received and saved for: " + username);
+                    System.out.println("Certificate received and stored for: " + username);
 
                     return 2;
                 }
             }
         }
 
-        private String generateSalt() {
-            byte[] salt = new byte[16];
-            new java.security.SecureRandom().nextBytes(salt);
-            return java.util.Base64.getEncoder().encodeToString(salt);
-        }
-
         private String hashPassword(String password, String salt) throws Exception {
-            // Concatenar password com salt
             String combined = password + salt;
-
-            // Calcular SHA-256
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(combined.getBytes("UTF-8"));
-
-            // Converter para Base64 para guardar no ficheiro
-            return java.util.Base64.getEncoder().encodeToString(hash);
+            byte[] hashBytes = CryptoService.computeSHA256(combined.getBytes(StandardCharsets.UTF_8));
+            return Base64.getEncoder().encodeToString(hashBytes);
         }
 
-        //Servidor verifica a integridade
         private void saveFileHash(String filePath) throws Exception {
             byte[] content = Files.readAllBytes(Paths.get(filePath));
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(content);
-            String hashBase64 = java.util.Base64.getEncoder().encodeToString(hash);
+            byte[] hash = CryptoService.computeSHA256(content);
+            String hashBase64 = Base64.getEncoder().encodeToString(hash);
 
-            // Guarda o hash num ficheiro com o mesmo nome + ".hash"
             try (java.io.PrintWriter pw = new java.io.PrintWriter(filePath + ".hash")) {
                 pw.print(hashBase64);
             }
@@ -1385,13 +1265,11 @@ public class SpertaServer {
             try {
                 String storedHash = new String(Files.readAllBytes(hashFile.toPath())).trim();
                 byte[] content = Files.readAllBytes(Paths.get(filePath));
-                MessageDigest digest = MessageDigest.getInstance("SHA-256");
-                byte[] hash = digest.digest(content);
-                String currentHash = java.util.Base64.getEncoder().encodeToString(hash);
+                byte[] hash = CryptoService.computeSHA256(content);
+                String currentHash = Base64.getEncoder().encodeToString(hash);
                 return storedHash.equals(currentHash);
             } catch (Exception e) {
-                //mensagem de erro da integridade
-                System.err.println("Erro a verificar integridade: " + e.getMessage());
+                System.err.println("Integrity verification error: " + e.getMessage());
                 return false;
             }
         }

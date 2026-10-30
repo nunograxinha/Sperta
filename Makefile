@@ -25,12 +25,12 @@ all: server client
 # Compilar servidor
 server:
 	$(MKDIR)
-	$(JAVAC) -d $(BIN_DIR) $(SRC_DIR)/server/SpertaServer.java
+	$(JAVAC) -d $(BIN_DIR) $(SRC_DIR)/utils/CryptoService.java $(SRC_DIR)/server/SpertaServer.java
 
 # Compilar cliente
 client:
 	$(MKDIR)
-	$(JAVAC) -d $(BIN_DIR) $(SRC_DIR)/client/SpertaClient.java
+	$(JAVAC) -d $(BIN_DIR) $(SRC_DIR)/utils/CryptoService.java $(SRC_DIR)/client/SpertaClient.java
 
 # Executar servidor
 run-server: server
