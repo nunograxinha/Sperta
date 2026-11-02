@@ -9,16 +9,25 @@ import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.PBEParameterSpec;
 import java.io.ByteArrayInputStream;
 import java.io.FileInputStream;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.security.*;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
+import java.util.Enumeration;
 
-public class CryptoService {
+public final class CryptoService {
+
     private static final String AES_ALGO = "AES";
     private static final String RSA_ALGO = "RSA";
     private static final String PBE_ALGO = "PBEWithHmacSHA256AndAES_128";
+    private static final String HASH_ALGO = "SHA-256";
     private static final String KEYSTORE_TYPE = "PKCS12";
     private static final int PBE_ITERATIONS = 100;
+    private static final int IV_LENGTH = 16;
+    private static final int SALT_LENGTH = 16;
+
+    private CryptoService() {}
 
     // 1. Keystore and Key Management
     public static PrivateKey loadPrivateKey(String keystorePath, char[] password, String alias) throws Exception {
@@ -26,8 +35,14 @@ public class CryptoService {
         try (FileInputStream fis = new FileInputStream(keystorePath)) {
             ks.load(fis, password);
         }
-        // Alias fallback logic omitted for brevity
-        return (PrivateKey) ks.getKey(alias, password);
+        if (alias != null && ks.containsAlias(alias)) {
+            return (PrivateKey) ks.getKey(alias, password);
+        }
+        Enumeration<String> aliases = ks.aliases();
+        if (aliases.hasMoreElements()) {
+            return (PrivateKey) ks.getKey(aliases.nextElement(), password);
+        }
+        throw new KeyStoreException("No valid key alias found in keystore.");
     }
 
     public static PublicKey getPublicKeyFromCertBytes(byte[] certBytes) throws Exception {
@@ -59,21 +74,20 @@ public class CryptoService {
     public static byte[] encryptAES(String plainText, SecretKey aesKey) throws Exception {
         Cipher cipher = Cipher.getInstance(AES_ALGO);
         cipher.init(Cipher.ENCRYPT_MODE, aesKey);
-        return cipher.doFinal(plainText.getBytes("UTF-8"));
+        return cipher.doFinal(plainText.getBytes(StandardCharsets.UTF_8));
     }
 
     public static String decryptAES(byte[] cipherText, SecretKey aesKey) throws Exception {
         Cipher cipher = Cipher.getInstance(AES_ALGO);
         cipher.init(Cipher.DECRYPT_MODE, aesKey);
         byte[] decrypted = cipher.doFinal(cipherText);
-        return new String(decrypted, "UTF-8");
+        return new String(decrypted, StandardCharsets.UTF_8);
     }
 
     public static byte[] encryptPBE(byte[] plainText, String password, byte[] salt) throws Exception {
         SecretKey key = derivePBEKey(password);
-        byte[] iv = new byte[16];
-        SecureRandom random = new SecureRandom();
-        random.nextBytes(iv);
+        byte[] iv = new byte[IV_LENGTH];
+        new SecureRandom().nextBytes(iv);
 
         Cipher cipher = Cipher.getInstance(PBE_ALGO);
         cipher.init(Cipher.ENCRYPT_MODE, key, createPBEParameters(salt, iv));
@@ -86,11 +100,11 @@ public class CryptoService {
     }
 
     public static byte[] decryptPBE(byte[] cipherText, String password, byte[] salt) throws Exception {
-        if (cipherText.length < 16) {
+        if (cipherText.length < IV_LENGTH) {
             throw new IllegalArgumentException("Encrypted data is too short to contain an IV");
         }
 
-        byte[] iv = new byte[16];
+        byte[] iv = new byte[IV_LENGTH];
         byte[] encrypted = new byte[cipherText.length - iv.length];
         System.arraycopy(cipherText, 0, iv, 0, iv.length);
         System.arraycopy(cipherText, iv.length, encrypted, 0, encrypted.length);
@@ -98,6 +112,27 @@ public class CryptoService {
         Cipher cipher = Cipher.getInstance(PBE_ALGO);
         cipher.init(Cipher.DECRYPT_MODE, derivePBEKey(password), createPBEParameters(salt, iv));
         return cipher.doFinal(encrypted);
+    }
+
+    // 4. Hashing and Nonce Digests
+    public static byte[] generateRandomSalt() {
+        byte[] salt = new byte[SALT_LENGTH];
+        new SecureRandom().nextBytes(salt);
+        return salt;
+    }
+
+    public static byte[] computeSHA256(byte[] data) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance(HASH_ALGO);
+        return digest.digest(data);
+    }
+
+    public static byte[] computeHashWithNonce(long nonce, byte[] data) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance(HASH_ALGO);
+        ByteBuffer buffer = ByteBuffer.allocate(Long.BYTES);
+        buffer.putLong(nonce);
+        digest.update(buffer.array());
+        digest.update(data);
+        return digest.digest();
     }
 
     private static SecretKey derivePBEKey(String password) throws Exception {

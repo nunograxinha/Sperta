@@ -1,12 +1,10 @@
-# Makefile simples para Java para testar com user1 de forma rapida, estar na pasta Sperta
+# Makefile for Sperta Project
 
-# Variáveis
 JAVAC = javac
 JAVA = java
 SRC_DIR = src
 BIN_DIR = bin
 
-# Deteta o sistema operativo para comandos específicos
 ifeq ($(OS),Windows_NT)
     MKDIR = if not exist "$(BIN_DIR)" mkdir "$(BIN_DIR)"
     RM = rmdir /s /q "$(BIN_DIR)"
@@ -19,25 +17,23 @@ else
     SEP = :
 endif
 
-# Alvo padrão (compila tudo)
 all: server client
 
-# Compilar servidor
+# Compile Server & Shared Utils
 server:
 	$(MKDIR)
-	$(JAVAC) -d $(BIN_DIR) $(SRC_DIR)/utils/CryptoService.java $(SRC_DIR)/server/SpertaServer.java
-
-# Compilar cliente
+	$(JAVAC) -d $(BIN_DIR) $(SRC_DIR)/utils/*.java $(SRC_DIR)/server/*.java
+	
+# Compile Client & Shared Utils
 client:
 	$(MKDIR)
-	$(JAVAC) -d $(BIN_DIR) $(SRC_DIR)/utils/CryptoService.java $(SRC_DIR)/client/SpertaClient.java
+	$(JAVAC) -d $(BIN_DIR) $(SRC_DIR)/utils/*.java $(SRC_DIR)/client/*.java
 
-# Executar servidor
+# Run Server in Classpath mode
 run-server: server
 	$(JAVA) -cp $(BIN_DIR) server.SpertaServer 22345 server-pw keystores/keystore.server 123456
 
-# Executar clientes
-# Nota: Alterar os argumentos conforme necessário (ex: password da keystore)
+# Run Clients in Classpath mode
 run-client: client
 	$(JAVA) -cp $(BIN_DIR) client.SpertaClient 127.0.0.1:22345 keystores/users/truststore.user1 123456 keystores/users/keystore.user1 123456 user1 1234
 
@@ -47,19 +43,21 @@ run-client2: client
 run-client3: client
 	$(JAVA) -cp $(BIN_DIR) client.SpertaClient 127.0.0.1:22345 keystores/users/truststore.user3 123456 keystores/users/keystore.user3 123456 user3 1234
 
-# Criar JARs
-jar: all
-	jar cfe SpertaServer.jar server.SpertaServer -C $(BIN_DIR) server
-	jar cfe SpertaClient.jar client.SpertaClient -C $(BIN_DIR) client
+# Package executable JARs including utils
+server-jar: server
+	jar cfe SpertaServer.jar server.SpertaServer -C $(BIN_DIR) server -C $(BIN_DIR) utils
 
-# Executar a partir dos JARs
-run-server-jar:
+client-jar: client
+	jar cfe SpertaClient.jar client.SpertaClient -C $(BIN_DIR) client -C $(BIN_DIR) utils
+
+jar: server-jar client-jar
+
+# Run from packaged JARs
+run-server-jar: server-jar
 	$(JAVA) -jar SpertaServer.jar 22345 server-pw keystores/keystore.server 123456
 
-run-client-jar:
+run-client-jar: client-jar
 	$(JAVA) -jar SpertaClient.jar 127.0.0.1:22345 keystores/users/truststore.user1 123456 keystores/users/keystore.user1 123456 user1 1234
-
-# Limpar binários e JARs
 clean:
 	-$(RM)
 	-$(RM_FILES) SpertaServer.jar SpertaClient.jar
