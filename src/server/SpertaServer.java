@@ -54,7 +54,7 @@ public class SpertaServer {
         ConsoleHandler consoleHandler = new ConsoleHandler();
         consoleHandler.setLevel(Level.ALL);
         consoleHandler.setFormatter(new java.util.logging.Formatter() {
-            private final DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+            private final DateTimeFormatter dtf = TIME_FORMATTER;
             private final ZoneId zoneId = ZoneId.systemDefault();
             @Override
             public String format(LogRecord logRecord) {

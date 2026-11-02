@@ -6,18 +6,22 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
+import java.security.GeneralSecurityException;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.*;
+import java.util.Base64;
+import java.util.Scanner;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
- * Data Access Object managing storage, concurrency, and integrity checks.
- * Encapsulates PBE encryption-at-rest for house/log files and plaintext storage with salts for user credentials.
+ * Data Access Object managing persistent storage, concurrency, and integrity checks.
+ * Encapsulates PBE encryption-at-rest for house profiles/logs and plaintext salted credentials.
  */
 public class StorageDAO {
 
@@ -29,38 +33,42 @@ public class StorageDAO {
     private static final String USERS_FILE = "data/users.txt";
     private static final String SALT_FILE = "data/server_salt.bin";
 
+    private static final DateTimeFormatter LOG_DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    private static final ZoneId DEFAULT_ZONE_ID = ZoneId.systemDefault();
+
     private final ConcurrentHashMap<String, ReentrantReadWriteLock> fileLocks = new ConcurrentHashMap<>();
     private final String cipherPassword;
     private byte[] pbeSalt;
 
-    public StorageDAO(String cipherPassword) throws Exception {
+    public StorageDAO(String cipherPassword) throws IOException, GeneralSecurityException {
         this.cipherPassword = cipherPassword;
         ensureDirectories();
         initPbeSalt();
         initUsersFile();
     }
 
-    private void ensureDirectories() {
-        new File(HOMES_DIR).mkdirs();
-        new File(LOGS_DIR).mkdirs();
-        new File(KEYS_DIR).mkdirs();
-        new File(CERTS_DIR).mkdirs();
+    private void ensureDirectories() throws IOException {
+        Files.createDirectories(Paths.get(DATA_DIR));
+        Files.createDirectories(Paths.get(HOMES_DIR));
+        Files.createDirectories(Paths.get(LOGS_DIR));
+        Files.createDirectories(Paths.get(KEYS_DIR));
+        Files.createDirectories(Paths.get(CERTS_DIR));
     }
 
-    private void initPbeSalt() throws Exception {
-        File saltFile = new File(SALT_FILE);
-        if (saltFile.exists()) {
-            this.pbeSalt = Files.readAllBytes(saltFile.toPath());
+    private void initPbeSalt() throws IOException {
+        Path saltPath = Paths.get(SALT_FILE);
+        if (Files.exists(saltPath)) {
+            this.pbeSalt = Files.readAllBytes(saltPath);
         } else {
             this.pbeSalt = CryptoService.generateRandomSalt();
-            Files.write(saltFile.toPath(), this.pbeSalt);
+            Files.write(saltPath, this.pbeSalt);
         }
     }
 
-    private void initUsersFile() throws Exception {
-        File users = new File(USERS_FILE);
-        if (!users.exists()) {
-            users.createNewFile();
+    private void initUsersFile() throws IOException, GeneralSecurityException {
+        Path usersPath = Paths.get(USERS_FILE);
+        if (!Files.exists(usersPath)) {
+            Files.createFile(usersPath);
             updateFileHash(USERS_FILE);
         }
     }
@@ -99,7 +107,7 @@ public class StorageDAO {
         }
     }
 
-    public int authenticateUser(String username, String password) throws Exception {
+    public int authenticateUser(String username, String password) throws IOException, GeneralSecurityException {
         Lock lock = getLock(USERS_FILE).readLock();
         lock.lock();
         try {
@@ -109,7 +117,9 @@ public class StorageDAO {
             try (Scanner sc = new Scanner(new File(USERS_FILE), StandardCharsets.UTF_8.name())) {
                 while (sc.hasNextLine()) {
                     String line = sc.nextLine().trim();
-                    if (line.isEmpty()) continue;
+                    if (line.isEmpty()) {
+                        continue;
+                    }
 
                     String[] parts = line.split(":");
                     if (parts.length == 3 && parts[0].equals(username)) {
@@ -126,7 +136,8 @@ public class StorageDAO {
         }
     }
 
-    public void registerNewUser(String username, String password, byte[] certificateBytes) throws Exception {
+    public void registerNewUser(String username, String password, byte[] certificateBytes) 
+            throws IOException, GeneralSecurityException {
         Lock lock = getLock(USERS_FILE).writeLock();
         lock.lock();
         try {
@@ -147,8 +158,8 @@ public class StorageDAO {
     }
 
     public byte[] getUserCertificate(String username) throws IOException {
-        File cert = new File(CERTS_DIR, username + ".cert");
-        return cert.exists() ? Files.readAllBytes(cert.toPath()) : null;
+        Path certPath = Paths.get(CERTS_DIR, username + ".cert");
+        return Files.exists(certPath) ? Files.readAllBytes(certPath) : null;
     }
 
     // ==========================================
@@ -156,13 +167,15 @@ public class StorageDAO {
     // ==========================================
 
     public boolean houseExists(String houseName) {
-        return new File(HOMES_DIR, houseName + ".txt").exists();
+        return Files.exists(Paths.get(HOMES_DIR, houseName + ".txt"));
     }
 
-    public House loadHouse(String houseName) throws Exception {
-        String path = HOMES_DIR + "/" + houseName + ".txt";
-        File f = new File(path);
-        if (!f.exists()) return null;
+    public House loadHouse(String houseName) throws IOException, GeneralSecurityException {
+        Path filePath = Paths.get(HOMES_DIR, houseName + ".txt");
+        String path = filePath.toString();
+        if (!Files.exists(filePath)) {
+            return null;
+        }
 
         Lock lock = getLock(path).readLock();
         lock.lock();
@@ -170,7 +183,7 @@ public class StorageDAO {
             if (!verifyFileHash(path)) {
                 throw new SecurityException("NOK-INTEGRITY: House file " + houseName + " integrity failure.");
             }
-            byte[] encrypted = Files.readAllBytes(f.toPath());
+            byte[] encrypted = Files.readAllBytes(filePath);
             byte[] decrypted = CryptoService.decryptPBE(encrypted, cipherPassword, pbeSalt);
             String content = new String(decrypted, StandardCharsets.UTF_8);
             return House.fromFileFormat(houseName, content);
@@ -179,8 +192,9 @@ public class StorageDAO {
         }
     }
 
-    public void saveHouse(House house) throws Exception {
-        String path = HOMES_DIR + "/" + house.getName() + ".txt";
+    public void saveHouse(House house) throws IOException, GeneralSecurityException {
+        Path filePath = Paths.get(HOMES_DIR, house.getName() + ".txt");
+        String path = filePath.toString();
         Lock lock = getLock(path).writeLock();
         lock.lock();
         try {
@@ -197,51 +211,54 @@ public class StorageDAO {
     // 3. Device Logs and E2E Key Storage
     // ==========================================
 
-    public void appendDeviceLog(String houseName, String deviceId, String valueStr) throws Exception {
+    public void appendDeviceLog(String houseName, String deviceId, String valueStr) 
+            throws IOException, GeneralSecurityException {
         String section = String.valueOf(deviceId.charAt(0)).toUpperCase();
-        File logDir = new File(LOGS_DIR + "/" + houseName + "/" + section);
-        logDir.mkdirs();
+        Path logDirPath = Paths.get(LOGS_DIR, houseName, section);
+        Files.createDirectories(logDirPath);
 
-        String path = logDir.getPath() + "/" + deviceId + ".csv";
+        String path = logDirPath.resolve(deviceId + ".csv").toString();
         Lock lock = getLock(path).writeLock();
         lock.lock();
         try {
             StringBuilder sb = new StringBuilder();
-            File logFile = new File(path);
-            if (logFile.exists() && logFile.length() > 0) {
+            Path logFilePath = Paths.get(path);
+            if (Files.exists(logFilePath) && Files.size(logFilePath) > 0) {
                 if (!verifyFileHash(path)) {
                     throw new SecurityException("NOK-INTEGRITY: Log file corrupted: " + path);
                 }
-                byte[] dec = CryptoService.decryptPBE(Files.readAllBytes(logFile.toPath()), cipherPassword, pbeSalt);
+                byte[] dec = CryptoService.decryptPBE(Files.readAllBytes(logFilePath), cipherPassword, pbeSalt);
                 sb.append(new String(dec, StandardCharsets.UTF_8));
             } else {
                 sb.append("device,value,timestamp\n");
             }
 
-            String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+            String timestamp = LocalDateTime.now(DEFAULT_ZONE_ID).format(LOG_DATE_FORMATTER);
             sb.append(deviceId).append(",").append(valueStr).append(",").append(timestamp).append("\n");
 
             byte[] enc = CryptoService.encryptPBE(sb.toString().getBytes(StandardCharsets.UTF_8), cipherPassword, pbeSalt);
-            Files.write(Paths.get(path), enc);
+            Files.write(logFilePath, enc);
             updateFileHash(path);
         } finally {
             lock.unlock();
         }
     }
 
-    public byte[] loadDeviceLog(String houseName, String deviceId) throws Exception {
+    public byte[] loadDeviceLog(String houseName, String deviceId) throws IOException, GeneralSecurityException {
         String section = String.valueOf(deviceId.charAt(0)).toUpperCase();
-        String path = LOGS_DIR + "/" + houseName + "/" + section + "/" + deviceId + ".csv";
-        File logFile = new File(path);
-        if (!logFile.exists()) return null;
+        Path logFilePath = Paths.get(LOGS_DIR, houseName, section, deviceId + ".csv");
+        if (!Files.exists(logFilePath)) {
+            return new byte[0]; // ou null se a lógica de quem chama depender explicitamente de null
+        }
 
+        String path = logFilePath.toString();
         Lock lock = getLock(path).readLock();
         lock.lock();
         try {
             if (!verifyFileHash(path)) {
                 throw new SecurityException("NOK-INTEGRITY: Log integrity failure: " + path);
             }
-            return CryptoService.decryptPBE(Files.readAllBytes(logFile.toPath()), cipherPassword, pbeSalt);
+            return CryptoService.decryptPBE(Files.readAllBytes(logFilePath), cipherPassword, pbeSalt);
         } finally {
             lock.unlock();
         }
@@ -253,21 +270,21 @@ public class StorageDAO {
     }
 
     public byte[] loadSectionKey(String houseName, String section, String user) throws IOException {
-        File kf = new File(KEYS_DIR + "/key." + houseName + "." + section.toUpperCase() + "." + user);
-        return kf.exists() ? Files.readAllBytes(kf.toPath()) : null;
+        Path keyPath = Paths.get(KEYS_DIR, "key." + houseName + "." + section.toUpperCase() + "." + user);
+        return Files.exists(keyPath) ? Files.readAllBytes(keyPath) : null;
     }
 
     // ==========================================
     // 4. SHA-256 Digest and Integrity Helpers
     // ==========================================
 
-    private String hashPassword(String password, String saltBase64) throws Exception {
+    private String hashPassword(String password, String saltBase64) throws GeneralSecurityException {
         String combined = password + saltBase64;
         byte[] digest = CryptoService.computeSHA256(combined.getBytes(StandardCharsets.UTF_8));
         return Base64.getEncoder().encodeToString(digest);
     }
 
-    private void updateFileHash(String filePath) throws Exception {
+    private void updateFileHash(String filePath) throws IOException, GeneralSecurityException {
         byte[] content = Files.readAllBytes(Paths.get(filePath));
         byte[] hash = CryptoService.computeSHA256(content);
         String hashBase64 = Base64.getEncoder().encodeToString(hash);
@@ -275,14 +292,16 @@ public class StorageDAO {
     }
 
     private boolean verifyFileHash(String filePath) {
-        File hashFile = new File(filePath + ".hash");
-        if (!hashFile.exists()) return true;
+        Path hashPath = Paths.get(filePath + ".hash");
+        if (!Files.exists(hashPath)) {
+            return true;
+        }
         try {
-            String stored = new String(Files.readAllBytes(hashFile.toPath()), StandardCharsets.UTF_8).trim();
+            String stored = new String(Files.readAllBytes(hashPath), StandardCharsets.UTF_8).trim();
             byte[] content = Files.readAllBytes(Paths.get(filePath));
             String calculated = Base64.getEncoder().encodeToString(CryptoService.computeSHA256(content));
             return stored.equals(calculated);
-        } catch (Exception e) {
+        } catch (IOException | GeneralSecurityException e) {
             return false;
         }
     }

@@ -13,6 +13,7 @@ import java.util.Set;
  * <owner>
  * <section>:(<dev1>-<val1>,...)[<user1>,...]
  */
+
 public class House {
 
     private static final String LINE_SEPARATOR = "\n";
