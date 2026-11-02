@@ -1,14 +1,21 @@
 package server;
 
-import java.util.*;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Scanner;
+import java.util.Set;
 
 /**
  * Domain model representing a Smart House profile in the Sperta system.
- * Handles parsing and serialization to the required file storage specification:
+ * Handles parsing and serialization according to the file storage specification:
  * <owner>
  * <section>:(<dev1>-<val1>,...)[<user1>,...]
  */
 public class House {
+
+    private static final String LINE_SEPARATOR = "\n";
     private final String name;
     private final String owner;
     private final Map<String, Section> sections = new LinkedHashMap<>();
@@ -31,10 +38,13 @@ public class House {
     }
 
     public Map<String, Section> getSections() {
-        return sections;
+        return Collections.unmodifiableMap(sections);
     }
 
     public Section getSection(String sectionKey) {
+        if (sectionKey == null) {
+            return null;
+        }
         return sections.get(sectionKey.toUpperCase());
     }
 
@@ -48,61 +58,77 @@ public class House {
 
     public String toFileFormat() {
         StringBuilder sb = new StringBuilder();
-        sb.append(owner).append("\n");
+        sb.append(owner).append(LINE_SEPARATOR);
         for (Section sec : sections.values()) {
-            sb.append(sec.toFileFormat()).append("\n");
+            sb.append(sec.toFileFormat()).append(LINE_SEPARATOR);
         }
         return sb.toString();
     }
 
     public static House fromFileFormat(String houseName, String content) {
-        Scanner sc = new Scanner(content);
-        if (!sc.hasNextLine()) {
-            return null;
+        try (Scanner sc = new Scanner(content)) {
+            if (!sc.hasNextLine()) {
+                return null;
+            }
+            String owner = sc.nextLine().trim();
+            House house = new House(houseName, owner);
+
+            while (sc.hasNextLine()) {
+                String line = sc.nextLine().trim();
+                parseLine(house, line);
+            }
+            return house;
         }
-        String owner = sc.nextLine().trim();
-        House house = new House(houseName, owner);
+    }
 
-        while (sc.hasNextLine()) {
-            String line = sc.nextLine().trim();
-            if (line.isEmpty() || !line.contains(":")) {
-                continue;
-            }
+    private static void parseLine(House house, String line) {
+        if (line.isEmpty() || !line.contains(":")) {
+            return;
+        }
 
-            int colonIdx = line.indexOf(':');
-            String secName = line.substring(0, colonIdx).trim().toUpperCase();
-            Section section = house.getSection(secName);
-            if (section == null) {
-                section = new Section(secName);
-                house.sections.put(secName, section);
-            }
+        int colonIdx = line.indexOf(':');
+        String secName = line.substring(0, colonIdx).trim().toUpperCase();
+        Section section = house.sections.computeIfAbsent(secName, Section::new);
 
-            int startParen = line.indexOf('(');
-            int endParen = line.lastIndexOf(')');
-            if (startParen != -1 && endParen > startParen) {
-                String devData = line.substring(startParen + 1, endParen).trim();
-                if (!devData.isEmpty()) {
-                    for (String devEntry : devData.split(",")) {
-                        String[] devParts = devEntry.trim().split("-");
-                        if (devParts.length == 2) {
-                            section.setDeviceValue(devParts[0].trim(), devParts[1].trim());
-                        }
-                    }
-                }
-            }
+        parseDevices(section, line);
+        parseUsers(section, line);
+    }
 
-            int startBracket = line.indexOf('[');
-            int endBracket = line.lastIndexOf(']');
-            if (startBracket != -1 && endBracket > startBracket) {
-                String userData = line.substring(startBracket + 1, endBracket).trim();
-                if (!userData.isEmpty()) {
-                    for (String u : userData.split(",")) {
-                        section.addUser(u.trim());
-                    }
-                }
+    private static void parseDevices(Section section, String line) {
+        int startParen = line.indexOf('(');
+        int endParen = line.lastIndexOf(')');
+        if (startParen == -1 || endParen <= startParen) {
+            return;
+        }
+
+        String devData = line.substring(startParen + 1, endParen).trim();
+        if (devData.isEmpty()) {
+            return;
+        }
+
+        for (String devEntry : devData.split(",")) {
+            String[] devParts = devEntry.trim().split("-");
+            if (devParts.length == 2) {
+                section.setDeviceValue(devParts[0].trim(), devParts[1].trim());
             }
         }
-        return house;
+    }
+
+    private static void parseUsers(Section section, String line) {
+        int startBracket = line.indexOf('[');
+        int endBracket = line.lastIndexOf(']');
+        if (startBracket == -1 || endBracket <= startBracket) {
+            return;
+        }
+
+        String userData = line.substring(startBracket + 1, endBracket).trim();
+        if (userData.isEmpty()) {
+            return;
+        }
+
+        for (String u : userData.split(",")) {
+            section.addUser(u.trim());
+        }
     }
 
     public static class Section {
@@ -119,11 +145,11 @@ public class House {
         }
 
         public Map<String, String> getDevices() {
-            return devices;
+            return Collections.unmodifiableMap(devices);
         }
 
         public Set<String> getAuthorizedUsers() {
-            return authorizedUsers;
+            return Collections.unmodifiableSet(authorizedUsers);
         }
 
         public void addUser(String user) {
@@ -147,23 +173,26 @@ public class House {
                         if (num > maxId) {
                             maxId = num;
                         }
-                    } catch (NumberFormatException ignored) {}
+                    } catch (NumberFormatException ignored) {
+                        // Expected when device ID suffix is not a parsable integer
+                    }
                 }
             }
             return maxId + 1;
         }
 
         public String toFileFormat() {
+            String devData = devices.entrySet().stream()
+                    .map(entry -> entry.getKey() + "-" + entry.getValue())
+                    .collect(java.util.stream.Collectors.joining(","));
+
             StringBuilder sb = new StringBuilder();
-            sb.append(name).append(":(");
-            List<String> devList = new ArrayList<>();
-            for (Map.Entry<String, String> entry : devices.entrySet()) {
-                devList.add(entry.getKey() + "-" + entry.getValue());
-            }
-            sb.append(String.join(",", devList));
-            sb.append(")[");
-            sb.append(String.join(",", authorizedUsers));
-            sb.append("]");
+            sb.append(name)
+              .append(":(")
+              .append(devData)
+              .append(")[")
+              .append(String.join(",", authorizedUsers))
+              .append("]");
             return sb.toString();
         }
     }
