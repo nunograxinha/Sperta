@@ -1,11 +1,12 @@
 package server;
 
-import java.io.File;
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -28,7 +29,7 @@ public class SpertaServer {
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
-    // Protocol Response Literals (SonarQube S1192)
+    // Protocol Response Literals
     private static final String RESP_OK = "OK";
     private static final String RESP_NOK = "NOK";
     private static final String RESP_NO_PERM = "NOPERM";
@@ -53,7 +54,7 @@ public class SpertaServer {
 
         ConsoleHandler consoleHandler = new ConsoleHandler();
         consoleHandler.setLevel(Level.ALL);
-        consoleHandler.setFormatter(new java.util.logging.Formatter() {
+        consoleHandler.setFormatter(new java.util.logging.SimpleFormatter() {
             private final DateTimeFormatter dtf = TIME_FORMATTER;
             private final ZoneId zoneId = ZoneId.systemDefault();
             @Override
@@ -134,12 +135,12 @@ public class SpertaServer {
     }
 
     private String loadExpectedClientPath() {
-        File file = new File("data/attestation.txt");
-        if (!file.exists()) {
+        Path filePath = Paths.get("data", "attestation.txt");
+        if (!Files.exists(filePath)) {
             return null;
         }
 
-        try (Scanner sc = new Scanner(file, StandardCharsets.UTF_8.name())) {
+        try (Scanner sc = new Scanner(filePath, StandardCharsets.UTF_8)) {
             while (sc.hasNextLine()) {
                 String line = sc.nextLine().trim();
                 if (line.startsWith("SpertaClient:")) {
@@ -161,19 +162,16 @@ public class SpertaServer {
             this.referenceClientPath = referenceClientPath;
         }
 
-        @Override
+       @Override
         public void run() {
-            ObjectInputStream inStream = null;
-            ObjectOutputStream outStream = null;
             String username = null;
 
-            try {
-                outStream = new ObjectOutputStream(socket.getOutputStream());
-                inStream = new ObjectInputStream(socket.getInputStream());
+            try (SSLSocket clientSocket = this.socket;
+                 ObjectOutputStream outStream = new ObjectOutputStream(clientSocket.getOutputStream());
+                 ObjectInputStream inStream = new ObjectInputStream(clientSocket.getInputStream())) {
 
                 // STEP 1: Binary Attestation
                 if (referenceClientPath != null && !handleAttestation(inStream, outStream)) {
-                    socket.close();
                     return;
                 }
 
@@ -206,7 +204,7 @@ public class SpertaServer {
                         username = user;
                     }
                 }
-                
+
                 // STEP 3: Message / Command Processing Loop
                 receiveMessages(inStream, outStream, username);
 
@@ -226,15 +224,15 @@ public class SpertaServer {
             try {
                 byte[] clientHash = (byte[]) in.readObject();
 
-                File referenceFile = new File(referenceClientPath);
-                if (!referenceFile.exists()) {
+                Path refPath = Paths.get(referenceClientPath);
+                if (!Files.exists(refPath)) {
                     LOGGER.log(Level.WARNING, "Reference client executable not found: {0}", referenceClientPath);
                     out.writeObject(RESP_NOK_ATTEST);
                     out.flush();
                     return false;
                 }
 
-                byte[] referenceJarBytes = Files.readAllBytes(referenceFile.toPath());
+                byte[] referenceJarBytes = Files.readAllBytes(refPath);
                 byte[] serverHash = CryptoService.computeHashWithNonce(nonce, referenceJarBytes);
 
                 if (Arrays.equals(clientHash, serverHash)) {
@@ -292,6 +290,7 @@ public class SpertaServer {
             dispatchCommand(parts, inStream, outStream, username);
             return true;
         }
+
         private void dispatchCommand(String[] parts, ObjectInputStream inStream, 
                                      ObjectOutputStream outStream, String username) throws IOException {
             String command = parts[0].toUpperCase();
@@ -332,9 +331,12 @@ public class SpertaServer {
                 return;
             }
 
-            HashMap<String, byte[]> keys = new HashMap<>();
+            Map<String, byte[]> keys = new HashMap<>();
             try {
-                keys = (HashMap<String, byte[]>) inStream.readObject();
+                Object receivedKeys = inStream.readObject();
+                if (receivedKeys instanceof Map<?, ?> map) {
+                    keys = (Map<String, byte[]>) map;
+                }
             } catch (Exception e) {
                 LOGGER.log(Level.WARNING, e, () -> "Error receiving section keys: " + e.getMessage());
             }
@@ -397,7 +399,7 @@ public class SpertaServer {
             outStream.flush();
         }
 
-        private String handleCreate(String houseName, String owner, HashMap<String, byte[]> sectionKeys) {
+        private String handleCreate(String houseName, String owner, Map<String, byte[]> sectionKeys) {
             if (storageDAO.houseExists(houseName)) {
                 return RESP_NOK;
             }
@@ -486,7 +488,7 @@ public class SpertaServer {
 
                 // E2E Key Re-wrapping step
                 byte[] targetCertBytes = storageDAO.getUserCertificate(targetUser);
-                HashMap<String, byte[]> keysToWrap = new HashMap<>();
+                Map<String, byte[]> keysToWrap = new HashMap<>();
 
                 for (String secKey : targetSections) {
                     byte[] k = storageDAO.loadSectionKey(houseName, secKey, requestingUser);
@@ -499,8 +501,8 @@ public class SpertaServer {
                 outStream.flush();
 
                 Object resp = inStream.readObject();
-                if (resp instanceof HashMap) {
-                    HashMap<String, byte[]> newKeys = (HashMap<String, byte[]>) resp;
+                if (resp instanceof Map<?, ?> rawMap) {
+                    Map<String, byte[]> newKeys = (Map<String, byte[]>) rawMap;
                     for (Map.Entry<String, byte[]> entry : newKeys.entrySet()) {
                         storageDAO.saveSectionKey(houseName, entry.getKey(), targetUser, entry.getValue());
                     }
@@ -585,7 +587,7 @@ public class SpertaServer {
                     return;
                 }
 
-                HashMap<String, byte[]> keysMap = new HashMap<>();
+                Map<String, byte[]> keysMap = new HashMap<>();
                 for (String sec : accessibleSections) {
                     byte[] k = storageDAO.loadSectionKey(houseName, sec, username);
                     if (k != null) {
@@ -636,7 +638,7 @@ public class SpertaServer {
                     return;
                 }
 
-                HashMap<String, byte[]> keysMap = new HashMap<>();
+                Map<String, byte[]> keysMap = new HashMap<>();
                 byte[] k = storageDAO.loadSectionKey(houseName, sectionName, username);
                 if (k != null) {
                     keysMap.put(sectionName, k);
