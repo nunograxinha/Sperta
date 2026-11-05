@@ -2,60 +2,101 @@ PROJETO 2 - SC 2025/2026
 =========================
 Sistema Distribuído Sperta
 
-------------------------------------------------
 AUTORES
-------------------------------------------------
+-------
 - Diogo Chambel - 53319
 - Márcio Moreira - 41972
 - Nuno Graxinha - 59855
 
-------------------------------------------------
 DESENVOLVIMENTO
-------------------------------------------------
-O projeto foi desenvolvido em ambiente Windows
+---------------
+O projeto foi desenvolvido em ambiente Windows, utilizando Java e JavaFX.
 
-------------------------------------------------
+REQUISITOS
+----------
+- JDK com java, javac e keytool disponíveis.
+- JavaFX 17 em lib/javafx-sdk-17.0.21/lib.
+- make para utilizar os comandos do Makefile.
+
 COMPILAÇÃO
-------------------------------------------------
-O projeto inclui um Makefile para facilitar o processo. Na raiz do projeto (Sperta/), corra:
+----------
+Na raiz da diretoria Sperta/:
+
   make
-
-Para compilar e gerar os ficheiros executáveis (.jar) do Cliente e Servidor, corra:
   make jar
+  make gui
 
-Isto irá criar a diretoria bin/ e gerar o SpertaServer.jar e SpertaClient.jar.
-Para limpar as diretorias compiladas e os JARs:
+Para limpar os ficheiros compilados e os JARs:
+
   make clean
 
-------------------------------------------------
-EXECUÇÃO (Fase 2 - Criptografia, TLS e E2E)
-------------------------------------------------
+EXECUÇÃO
+--------
 
 [ SERVIDOR ]
-Para iniciar a aplicação do servidor com o Makefile (usa o porto 22345 e a keystore pré-definida):
+
+O servidor utiliza, por omissão, o porto 22345, a cifra server-pw,
+a keystore keystores/keystore.server e a password 123456:
+
   make run-server
-  
-Ou diretamente através do .jar compilado pelo Makefile:
   make run-server-jar
 
-De forma manual (via JAR):
-  java -jar SpertaServer.jar <porto> <password-cifra> <caminho-keystore> <password-keystore-server>
-  Exemplo: java -jar SpertaServer.jar 22345 server-pw keystores/keystore.server 123456
+Com parâmetros explícitos:
 
-De forma manual (via classes compiladas):
   java -cp bin server.SpertaServer <porto> <password-cifra> <caminho-keystore> <password-keystore-server>
+  java -jar SpertaServer.jar <porto> <password-cifra> <caminho-keystore> <password-keystore-server>
 
+[ CLIENTE GRÁFICO ]
 
-[ CLIENTE ]
-Para iniciar o cliente e autenticar no servidor via Makefile (usa o user1 por omissão):
+  make run-gui
+
+No ecrã de login, preencha o servidor, porto, username e password.
+O botão Create New Keystore / Truststore regista o utilizador, cria as
+keystores/truststores locais e envia o certificado para
+data/certs/<username>.cert no servidor.
+
+[ CLIENTE DE LINHA DE COMANDOS ]
+
   make run-client
-  
-Ou diretamente através do .jar compilado pelo Makefile:
-  make run-client-jar
+  make run-client2
+  make run-client3
 
-De forma manual (via JAR):
-  java -jar SpertaClient.jar <serverAddress> <truststore> <password-truststore> <keystore> <password-keystore> <user-id> <password>
-  Exemplo: java -jar SpertaClient.jar 127.0.0.1:22345 keystores/truststore.client 123456 keystores/users/keystore.user1 123456 user1 1234
+Ou manualmente:
 
-De forma manual (via classes compiladas):
   java -cp bin client.SpertaClient <serverAddress> <truststore> <password-truststore> <keystore> <password-keystore> <user-id> <password>
+  java -jar SpertaClient.jar <serverAddress> <truststore> <password-truststore> <keystore> <password-keystore> <user-id> <password>
+
+FUNCIONALIDADES
+---------------
+- Criar casas e listar apenas casas acessíveis.
+- Registar dispositivos com IDs automáticos, como M1 e M2.
+- Conceder acesso por secção a outros utilizadores.
+- Executar EC com valores entre 0 e 600.
+- Consultar estado dos dispositivos e histórico RH.
+- Criar e abrir relatórios RT.
+
+O proprietário tem acesso a todas as secções. Os restantes utilizadores só
+acedem às secções que lhes foram concedidas.
+
+FICHEIROS GERADOS
+-----------------
+- keystores/users/keystore.<username>
+- keystores/users/truststore.<username>
+- data/certs/<username>.cert
+- data/homes/
+- data/keys/
+- RH/<house>_<device>_history.csv
+- RT/<user>_<house>_status.txt
+
+Formato RT:
+
+  User: user1, House: house1
+  M1: ON (2 min), 2026-11-05 16:05:00
+
+Formato RH:
+
+  device,value,timestamp
+  M1,2,2026-11-05 16:05:00
+  M1,0,2026-11-05 16:07:00
+
+Quando um temporizador termina, é registada a transição para o valor 0.
