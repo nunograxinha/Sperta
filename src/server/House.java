@@ -57,6 +57,13 @@ public class House {
         return sec != null && sec.hasUser(user);
     }
 
+    public boolean hasAccess(String user) {
+        if (owner.equals(user)) {
+            return true;
+        }
+        return sections.keySet().stream().anyMatch(section -> isAuthorized(user, section));
+    }
+
     public String toFileFormat() {
         StringBuilder sb = new StringBuilder();
         sb.append(owner).append(LINE_SEPARATOR);

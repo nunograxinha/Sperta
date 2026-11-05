@@ -7,6 +7,7 @@ import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.GeneralSecurityException;
 import java.security.PrivateKey;
@@ -15,17 +16,14 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Scanner;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 import javax.crypto.SecretKey;
 
 /**
  * Handles the interactive terminal session, command parsing, E2E encryption dispatch,
  * and decryption of received server files (RT/RH).
  */
+@SuppressWarnings("java:S106")
 public class CommandHandler {
-
-    private static final Logger LOGGER = Logger.getLogger(CommandHandler.class.getName());
 
     private final ObjectOutputStream outStream;
     private final ObjectInputStream inStream;
@@ -33,6 +31,7 @@ public class CommandHandler {
     private final String username;
     private final String keystorePath;
     private final String keystorePassword;
+    private static final String SERVER_PREFIX = "[SERVER]: ";
 
     public CommandHandler(ObjectOutputStream outStream, ObjectInputStream inStream, Scanner scanner,
                           String username, String keystorePath, String keystorePassword) {
@@ -47,13 +46,13 @@ public class CommandHandler {
     public void startLoop() {
         printBanner();
         while (scanner.hasNextLine()) {
-            LOGGER.log(Level.INFO, "> ");
+            System.out.print("> ");
             String line = scanner.nextLine().trim();
             if (!line.isEmpty()) {
                 try {
                     processCommand(line);
                 } catch (IOException | ClassNotFoundException | GeneralSecurityException e) {
-                    LOGGER.log(Level.SEVERE, "Command execution error: {0}", e.getMessage());
+                    System.err.println("Command execution error: " + e.getMessage());
                 }
             }
         }
@@ -68,6 +67,11 @@ public class CommandHandler {
             return;
         }
 
+        if ("RH".equals(command) && parts.length >= 3) {
+            parts[2] = parts[2].toUpperCase();
+            line = String.join(" ", parts);
+        }
+        
         outStream.writeObject(line);
 
         if ("CREATE".equals(command) && parts.length >= 2) {
@@ -84,24 +88,24 @@ public class CommandHandler {
             handleAddResponse(parts[1]);
         } else {
             Object response = inStream.readObject();
-            LOGGER.log(Level.INFO, "[SERVER]: {0}", response);
+            System.out.println(SERVER_PREFIX + response);
         }
     }
 
     private void handleEcCommand(String[] parts) throws IOException, ClassNotFoundException, GeneralSecurityException {
         String hm = parts[1];
-        String d = parts[2];
+        String d = parts[2].toUpperCase();
         String section = String.valueOf(d.charAt(0)).toUpperCase();
 
         int value;
         try {
             value = Integer.parseInt(parts[3]);
             if (value < 0 || value > 600) {
-                LOGGER.log(Level.WARNING, "Error: Value must be an integer between 0 and 600.");
+                System.out.println("Error: Value must be an integer between 0 and 600.");
                 return;
             }
         } catch (NumberFormatException e) {
-            LOGGER.log(Level.WARNING, "Error: EC command requires an integer value.");
+            System.out.println("Error: EC command requires an integer value.");
             return;
         }
 
@@ -110,7 +114,7 @@ public class CommandHandler {
 
         Object keyResp = inStream.readObject();
         if (!(keyResp instanceof byte[] wrappedKeyBytes)) {
-            LOGGER.log(Level.WARNING, "E2E Error: Failed to obtain section key. Server response: {0}", keyResp);
+            System.out.println("E2E Error: Failed to obtain section key. Server response: " + keyResp);
             return;
         }
 
@@ -124,7 +128,7 @@ public class CommandHandler {
         outStream.flush();
 
         Object response = inStream.readObject();
-        LOGGER.log(Level.INFO, "[SERVER]: {0}", response);
+        System.out.println(SERVER_PREFIX + response);
     }
 
     private void handleCreateKeys() throws IOException {
@@ -133,7 +137,7 @@ public class CommandHandler {
                     username, keystorePath, keystorePassword);
             outStream.writeObject(wrappedKeys);
         } catch (Exception e) {
-            LOGGER.log(Level.SEVERE, "Error generating section keys: {0}", e.getMessage());
+            System.err.println("Error generating section keys: " + e.getMessage());
             outStream.writeObject(Collections.emptyMap());
         }
     }
@@ -142,18 +146,14 @@ public class CommandHandler {
     private void handleAddResponse(String targetUser) throws IOException, ClassNotFoundException {
         Object resp = inStream.readObject();
 
-        switch (resp) {
-            case Object[] e2eData when e2eData.length >= 3 && "E2E_ADD".equals(e2eData[0]) ->
-                processE2eAdd(targetUser, (Map<String, byte[]>) e2eData[1], (byte[]) e2eData[2]);
-
-            case String serverMsg ->
-                LOGGER.log(Level.INFO, "[SERVER]: {0}", serverMsg);
-
-            case null ->
-                LOGGER.log(Level.WARNING, "[SERVER]: Received null response");
-
-            default ->
-                LOGGER.log(Level.INFO, "[SERVER]: {0}", resp);
+        if (resp instanceof Object[] e2eData && e2eData.length >= 3 && "E2E_ADD".equals(e2eData[0])) {
+            processE2eAdd(targetUser, (Map<String, byte[]>) e2eData[1], (byte[]) e2eData[2]);
+        } else if (resp instanceof String serverMsg) {
+            System.out.println(SERVER_PREFIX + serverMsg);
+        } else if (resp == null) {
+            System.out.println(SERVER_PREFIX + "Received null response");
+        } else {
+            System.out.println(SERVER_PREFIX + resp);
         }
     }
 
@@ -164,9 +164,9 @@ public class CommandHandler {
 
         try {
             ClientCryptoHelper.saveCertificateToTrustStore(trustStorePath, trustStorePass, targetUser, targetCertBytes);
-            LOGGER.log(Level.INFO, "[TRUST] Certificate for {0} saved to truststore.", targetUser);
+            System.out.println("[TRUST] Certificate for " + targetUser + " saved to truststore.");
         } catch (Exception e) {
-            LOGGER.log(Level.SEVERE, "[TRUST] Error storing certificate into truststore: {0}", e.getMessage());
+            System.err.println("[TRUST] Error storing certificate into truststore: " + e.getMessage());
         }
 
         try {
@@ -176,9 +176,9 @@ public class CommandHandler {
             outStream.flush();
 
             String finalResp = (String) inStream.readObject();
-            LOGGER.log(Level.INFO, "[SERVER]: {0}", finalResp);
+            System.out.println(SERVER_PREFIX + finalResp);
         } catch (Exception e) {
-            LOGGER.log(Level.SEVERE, "Failed to re-wrap keys: {0}", e.getMessage());
+            System.err.println("Failed to re-wrap keys: " + e.getMessage());
             outStream.writeObject(Collections.emptyMap());
             outStream.flush();
         }
@@ -198,7 +198,7 @@ public class CommandHandler {
         }
 
         if (!"OK".equals(responseStatus)) {
-            LOGGER.log(Level.WARNING, "[SERVER]: {0}", responseStatus);
+            System.out.println(SERVER_PREFIX + responseStatus);
             return;
         }
 
@@ -209,9 +209,19 @@ public class CommandHandler {
         Map<String, SecretKey> aesKeys = unwrapAllReceivedKeys(wrappedKeysMap);
         String decryptedContent = decryptFileContent(contentStr, aesKeys);
 
-        Files.write(Paths.get(localFilename), decryptedContent.getBytes(StandardCharsets.UTF_8));
-        LOGGER.log(Level.INFO, "File saved: {0}\n--- Content ---\n{1}\n---------------", 
-                new Object[]{localFilename, decryptedContent});
+        Path targetPath = Paths.get(localFilename);
+        if (targetPath.getParent() != null) {
+            Files.createDirectories(targetPath.getParent());
+        }
+
+        Files.write(targetPath, decryptedContent.getBytes(StandardCharsets.UTF_8));
+        System.out.println("File saved: " + targetPath);
+        System.out.println("--- Content ---");
+        System.out.println(decryptedContent);
+        System.out.println("---------------");
+
+
+
     }
 
     private Map<String, SecretKey> unwrapAllReceivedKeys(Map<String, byte[]> wrappedKeysMap)
@@ -227,8 +237,7 @@ public class CommandHandler {
                 SecretKey aesKey = CryptoService.unwrapKeyRSA(entry.getValue(), privKey);
                 aesKeys.put(entry.getKey(), aesKey);
             } catch (GeneralSecurityException e) {
-                LOGGER.log(Level.SEVERE, "Failed to unwrap section key {0}: {1}", 
-                        new Object[]{entry.getKey(), e.getMessage()});
+                System.err.println("Failed to unwrap section key " + entry.getKey() + ": " + e.getMessage());
             }
         }
         return aesKeys;
@@ -288,17 +297,17 @@ public class CommandHandler {
 
     private String buildRtFilename(String[] parts) {
         String house = (parts.length >= 2) ? parts[1] : "house";
-        return "rt_" + house + ".txt";
+        return Paths.get("RT", "rt_" + house + ".txt").toString();
     }
 
     private String buildRhFilename(String[] parts) {
         String house = (parts.length >= 2) ? parts[1] : "house";
-        String device = (parts.length >= 3) ? parts[2] : "device";
-        return "rh_" + house + "_" + device + ".csv";
+        String device = (parts.length >= 3) ? parts[2].toUpperCase() : "device";
+        return Paths.get("RH", "rh_" + house + "_" + device + ".csv").toString();
     }
 
     private void printBanner() {
-        LOGGER.log(Level.INFO, """
+        System.out.println("""
 
                 ╔═════════════════════════════════════════════════════════════════════════════╗
                 ║                          SMART HOME CONTROL PANEL                           ║
