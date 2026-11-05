@@ -24,6 +24,8 @@ import java.util.Scanner;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * Data Access Object managing persistent storage, concurrency, and integrity checks.
@@ -31,6 +33,8 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  */
 public class StorageDAO {
 
+    private static final Logger LOGGER = Logger.getLogger(StorageDAO.class.getName());
+    private static final SecureRandom RANDOM = new SecureRandom();
     private static final String DATA_DIR = "data";
     private static final String HOMES_DIR = "data/homes";
     private static final String LOGS_DIR = "RH";
@@ -38,6 +42,8 @@ public class StorageDAO {
     private static final String CERTS_DIR = "data/certs";
     private static final String USERS_FILE = "data/users.txt";
     private static final String SALT_FILE = "data/server_salt.bin";
+    private static final String CERTIFICATE_SUFFIX = ".cert";
+    private static final String HISTORY_SUFFIX = "_history.csv";
 
     private static final DateTimeFormatter LOG_DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static final ZoneId DEFAULT_ZONE_ID = ZoneId.systemDefault();
@@ -88,7 +94,7 @@ public class StorageDAO {
     // ==========================================
 
     public synchronized boolean userExists(String username) {
-        File usersFile = new File("data/users.txt");
+        File usersFile = new File(USERS_FILE);
         if (!usersFile.exists()) {
             usersFile = new File("users.txt");
         }
@@ -104,7 +110,7 @@ public class StorageDAO {
                 }
             }
         } catch (IOException e) {
-            System.err.println("Error reading users file: " + e.getMessage());
+            LOGGER.log(Level.WARNING, "Error reading users file: {0}", e.getMessage());
         }
         return false;
 }
@@ -139,7 +145,7 @@ public class StorageDAO {
     }
 
     public synchronized boolean registerNewUser(String username, String password, byte[] certBytes) {
-        File usersFile = new File("data/users.txt");
+        File usersFile = new File(USERS_FILE);
         if (!usersFile.exists()) {
             usersFile = new File("users.txt");
         }
@@ -147,7 +153,7 @@ public class StorageDAO {
         try {
             // 1. Generate 16-byte random salt
             byte[] salt = new byte[16];
-            new SecureRandom().nextBytes(salt);
+            RANDOM.nextBytes(salt);
             String saltBase64 = Base64.getEncoder().encodeToString(salt);
 
             // 2. Hash password with salt using SHA-256 (matches username:hash:salt)
@@ -158,7 +164,7 @@ public class StorageDAO {
 
             // 3. Save certificate file if certBytes were provided
             if (certBytes != null && certBytes.length > 0) {
-                File certsDir = new File("data/certs");
+                File certsDir = new File(CERTS_DIR);
                 if (!certsDir.exists()) {
                     certsDir = new File("keystores/users");
                 }
@@ -166,7 +172,7 @@ public class StorageDAO {
                     certsDir.mkdirs();
                 }
 
-                File certFile = new File(certsDir, username + ".cert");
+                File certFile = new File(certsDir, username + CERTIFICATE_SUFFIX);
                 try (FileOutputStream fos = new FileOutputStream(certFile)) {
                     fos.write(certBytes);
                 }
@@ -179,13 +185,13 @@ public class StorageDAO {
             }
             return true;
         } catch (NoSuchAlgorithmException | IOException e) {
-            System.err.println("Failed to register new user: " + e.getMessage());
+            LOGGER.log(Level.WARNING, "Failed to register new user: {0}", e.getMessage());
             return false;
         }
     }
 
     public byte[] getUserCertificate(String username) throws IOException {
-        Path certPath = Paths.get(CERTS_DIR, username + ".cert");
+        Path certPath = Paths.get(CERTS_DIR, username + CERTIFICATE_SUFFIX);
         return Files.exists(certPath) ? Files.readAllBytes(certPath) : null;
     }
 
@@ -196,7 +202,7 @@ public class StorageDAO {
 
         Files.createDirectories(Paths.get(CERTS_DIR));
         Files.write(
-                Paths.get(CERTS_DIR, username + ".cert"),
+                Paths.get(CERTS_DIR, username + CERTIFICATE_SUFFIX),
                 certBytes,
                 StandardOpenOption.CREATE,
                 StandardOpenOption.TRUNCATE_EXISTING
@@ -252,13 +258,13 @@ public class StorageDAO {
     // 3. Device Logs and E2E Key Storage
     // ==========================================
 
-    public synchronized void logDeviceEvent(String houseName, String section, String deviceId, int value, String timestamp) {
+    public synchronized void logDeviceEvent(String houseName, String deviceId, int value, String timestamp) {
         File logDir = new File(LOGS_DIR);
         if (!logDir.exists()) {
             logDir.mkdirs();
         }
 
-        File csvFile = new File(logDir, houseName + "_" + deviceId + "_history.csv");
+        File csvFile = new File(logDir, houseName + "_" + deviceId + HISTORY_SUFFIX);
         boolean isNew = !csvFile.exists() || csvFile.length() == 0;
 
         // 1. Append the new row to the CSV file
@@ -269,18 +275,17 @@ public class StorageDAO {
             }
             pw.println(deviceId + "," + value + "," + timestamp);
         } catch (IOException e) {
-            System.err.println("Failed to write device log: " + e.getMessage());
-            return;
+            LOGGER.log(Level.WARNING, "Failed to write device log: {0}", e.getMessage());
         }
 
         // 2. Update the .hash integrity file if your StorageDAO maintains log hashes
     }
     public void appendDeviceLog(String houseName, String deviceId, String valueStr) 
-            throws IOException, GeneralSecurityException {
+            throws IOException {
         Path logDirPath = Paths.get(LOGS_DIR);
         Files.createDirectories(logDirPath);
 
-        String path = logDirPath.resolve(houseName + "_" + deviceId + "_history.csv").toString();
+        String path = logDirPath.resolve(houseName + "_" + deviceId + HISTORY_SUFFIX).toString();
         Lock lock = getLock(path).writeLock();
         lock.lock();
         try {
@@ -301,10 +306,10 @@ public class StorageDAO {
         }
     }
 
-    public byte[] loadDeviceLog(String houseName, String deviceId) throws IOException, GeneralSecurityException {
+    public byte[] loadDeviceLog(String houseName, String deviceId) throws IOException {
         Path logFilePath = Paths.get(
                 LOGS_DIR,
-                houseName + "_" + deviceId + "_history.csv");
+                houseName + "_" + deviceId + HISTORY_SUFFIX);
         if (!Files.exists(logFilePath)) {
             return new byte[0]; // ou null se a lógica de quem chama depender explicitamente de null
         }
@@ -333,8 +338,12 @@ public class StorageDAO {
     // ==========================================
 
     private String hashPassword(String password, String saltBase64) throws GeneralSecurityException {
-        String combined = password + saltBase64;
-        byte[] digest = CryptoService.computeSHA256(combined.getBytes(StandardCharsets.UTF_8));
+        byte[] salt = Base64.getDecoder().decode(saltBase64);
+        byte[] passwordBytes = password.getBytes(StandardCharsets.UTF_8);
+        byte[] combined = new byte[salt.length + passwordBytes.length];
+        System.arraycopy(salt, 0, combined, 0, salt.length);
+        System.arraycopy(passwordBytes, 0, combined, salt.length, passwordBytes.length);
+        byte[] digest = CryptoService.computeSHA256(combined);
         return Base64.getEncoder().encodeToString(digest);
     }
 

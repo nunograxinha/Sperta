@@ -1,7 +1,5 @@
 package client;
 
-import utils.CryptoService;
-
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -9,7 +7,6 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
-import java.net.URI;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.file.Files;
@@ -17,6 +14,9 @@ import java.security.GeneralSecurityException;
 import java.security.KeyStore;
 import java.util.Scanner;
 import java.util.logging.Level;
+import java.util.logging.Formatter;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
@@ -29,8 +29,22 @@ public class SpertaClient {
     private static final Logger LOGGER = Logger.getLogger(SpertaClient.class.getName());
     private static final int DEFAULT_PORT = 22345;
     private static final int CONNECTION_TIMEOUT_MILLIS = 10_000;
-    private static final String DEFAULT_REFERENCE_JAR = "SpertaClient.jar";
-    private static final int MAX_AUTH_ATTEMPTS = 3;
+
+    static {
+        configureConsoleLogging();
+    }
+
+    private static void configureConsoleLogging() {
+        Logger rootLogger = Logger.getLogger("");
+        for (Handler handler : rootLogger.getHandlers()) {
+            handler.setFormatter(new Formatter() {
+                @Override
+                public String format(LogRecord logRecord) {
+                    return formatMessage(logRecord) + System.lineSeparator();
+                }
+            });
+        }
+    }
 
     public static void main(String[] args) {
         SpertaClient client = new SpertaClient();
@@ -65,7 +79,7 @@ public class SpertaClient {
             try {
                 KeystoreManager.ensureUserKeystoreExists(username, password.toCharArray());
             } catch (GeneralSecurityException | IOException e) {
-                System.err.println("[ERROR] Could not prepare local security files: " + e.getMessage());
+                LOGGER.log(Level.SEVERE, "[ERROR] Could not prepare local security files: {0}", e.getMessage());
                 return;
             }
         } else {
@@ -101,11 +115,11 @@ public class SpertaClient {
             }
         }
 
-        System.out.println();
-        System.out.println("========================================");
-        System.out.println("        SPERTA COMMAND-LINE CLIENT");
-        System.out.println("========================================");
-        System.out.println("Connecting to " + host + ":" + port + " as " + username + "...");
+        LOGGER.info("");
+        LOGGER.info("========================================");
+        LOGGER.info("        SPERTA COMMAND-LINE CLIENT");
+        LOGGER.info("========================================");
+        LOGGER.log(Level.INFO, "Connecting to {0}:{1} as {2}...", new Object[]{host, port, username});
 
         try (Scanner scanner = new Scanner(System.in)) {
             connectAndExecute(host, port, username, password, keystorePath, keystorePassword, scanner);
@@ -126,7 +140,7 @@ public class SpertaClient {
     private void connectAndExecute(String host, int port, String username, String password,
                                    String keystorePath, String keystorePassword, Scanner scanner) {
         try {
-            System.out.println("[INFO] Loading local keystore and truststore...");
+            LOGGER.info("[INFO] Loading local keystore and truststore...");
             SSLContext sslContext = createSslContext(
                     keystorePath,
                     keystorePassword,
@@ -134,7 +148,7 @@ public class SpertaClient {
                     System.getProperty("javax.net.ssl.trustStorePassword"));
             SSLSocketFactory sslFact = sslContext.getSocketFactory();
 
-            System.out.println("[INFO] Connecting to server...");
+            LOGGER.info("[INFO] Connecting to server...");
             try (Socket plainSocket = new Socket()) {
                 plainSocket.connect(
                         new InetSocketAddress(host, port),
@@ -143,15 +157,16 @@ public class SpertaClient {
                         plainSocket, host, port, true)) {
             socket.setEnabledProtocols(new String[]{"TLSv1.2", "TLSv1.3"});
             socket.setSoTimeout(CONNECTION_TIMEOUT_MILLIS);
-            System.out.println("[INFO] Starting TLS handshake...");
+            LOGGER.info("[INFO] Starting TLS handshake...");
             socket.startHandshake();
 
             try (BufferedReader in = new BufferedReader(
                         new InputStreamReader(socket.getInputStream(), java.nio.charset.StandardCharsets.UTF_8));
                  PrintWriter out = new PrintWriter(
                         new OutputStreamWriter(socket.getOutputStream(), java.nio.charset.StandardCharsets.UTF_8), true)) {
-                System.out.println("[OK] Secure connection established.");
-                System.out.println("[OK] Client certificate accepted.");
+                LOGGER.info("[OK] Secure connection established.");
+                LOGGER.info("[OK] Client certificate accepted.");
+                authenticate(in, out, username, password);
                 CommandHandler handler = new CommandHandler(
                         in, out, scanner, username, keystorePath, keystorePassword);
                 handler.startLoop();
@@ -159,10 +174,21 @@ public class SpertaClient {
             }
             }
         } catch (IOException e) {
-            System.err.println("[ERROR] Network error: " + e.getMessage());
+            LOGGER.log(Level.SEVERE, "[ERROR] Network error: {0}", e.getMessage());
         } catch (GeneralSecurityException e) {
-            System.err.println("[ERROR] TLS configuration error: " + e.getMessage());
+            LOGGER.log(Level.SEVERE, "[ERROR] TLS configuration error: {0}", e.getMessage());
         }
+    }
+
+    private void authenticate(BufferedReader in, PrintWriter out, String username, String password)
+            throws IOException {
+        out.println("AUTH " + username + " " + password);
+        String response = in.readLine();
+        if (response == null || !response.startsWith("OK:AUTHENTICATED")) {
+            throw new IOException(response == null ? "Server closed the connection during authentication."
+                    : response);
+        }
+        LOGGER.info("[OK] User authenticated.");
     }
 
     private SSLContext createSslContext(

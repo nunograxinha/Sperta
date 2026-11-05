@@ -9,16 +9,22 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.GeneralSecurityException;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Scanner;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * Interactive text-protocol client matching the GUI network service.
  */
 public class CommandHandler {
+
+    private static final Logger LOGGER = Logger.getLogger(CommandHandler.class.getName());
+    private static final String ERROR_PREFIX = "ERROR";
 
     private final BufferedReader in;
     private final PrintWriter out;
@@ -45,20 +51,21 @@ public class CommandHandler {
     public void startLoop() {
         printBanner();
         while (scanner.hasNextLine()) {
-            System.out.print("sperta> ");
+            LOGGER.info("sperta> ");
             String line = scanner.nextLine().trim();
-            if (line.isEmpty()) {
-                continue;
-            }
-            try {
-                processCommand(line);
-            } catch (IOException | GeneralSecurityException e) {
-                System.err.println("[ERROR] " + e.getMessage());
+            if (!line.isEmpty()) {
+                try {
+                    if (!processCommand(line)) {
+                        break;
+                    }
+                } catch (IOException | GeneralSecurityException e) {
+                    LOGGER.log(Level.SEVERE, "[ERROR] {0}", e.getMessage());
+                }
             }
         }
     }
 
-    private void processCommand(String input) throws IOException, GeneralSecurityException {
+    private boolean processCommand(String input) throws IOException, GeneralSecurityException {
         String[] parts = input.split("\\s+");
         String command = parts[0].toUpperCase();
 
@@ -77,15 +84,16 @@ public class CommandHandler {
             case "RT" -> requireParts(parts, 2, values -> getStatus(values[1], true));
             case "HELP" -> printBanner();
             case "QUIT", "EXIT" -> {
-                return;
+                return false;
             }
-            default -> System.out.println("[ERROR] Unknown command. Type HELP for available commands.");
+            default -> LOGGER.severe("[ERROR] Unknown command. Type HELP for available commands.");
         }
+        return true;
     }
 
     private void listHouses() throws IOException {
         out.println("LIST_HOUSES");
-        System.out.println("[HOUSES]");
+        LOGGER.info("[HOUSES]");
         String line;
         while ((line = in.readLine()) != null && !"END_HOUSES".equals(line)) {
             printResponseLine(line);
@@ -94,26 +102,29 @@ public class CommandHandler {
 
     private void getStatus(String house, boolean saveReport) throws IOException {
         out.println("GET_STATUS " + house);
-        System.out.println("[STATUS] " + house);
-            StringBuilder report = new StringBuilder()
-                    .append("User: ").append(username).append(", House: ").append(house).append('\n');
-            String line;
-            while ((line = in.readLine()) != null && !"END_STATUS".equals(line)) {
-                String formatted = formatStatusLine(line);
-                if (formatted != null) {
-                    System.out.println(formatted);
-                    report.append(formatted.trim())
-                            .append(", ")
-                            .append(LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")))
-                            .append('\n');
-                }
+        StringBuilder report = new StringBuilder()
+                .append("User: ").append(username).append(", House: ").append(house).append('\n');
+        StringBuilder display = new StringBuilder()
+                .append("[STATUS] ").append(house).append('\n');
+        String line;
+        while ((line = in.readLine()) != null && !"END_STATUS".equals(line)) {
+            String formatted = formatStatusLine(line);
+            if (formatted != null) {
+                display.append(formatted).append('\n');
+                report.append(formatted.trim())
+                        .append(", ")
+                        .append(LocalDateTime.now(ZoneId.systemDefault())
+                                .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")))
+                        .append('\n');
             }
-            if (saveReport) {
-                Path output = Paths.get("RT", username + "_" + house + "_status.txt");
-                Files.createDirectories(output.getParent());
-                Files.writeString(output, report.toString(), StandardCharsets.UTF_8);
-                System.out.println("[OK] Report saved to " + output);
-            }
+        }
+        LOGGER.log(Level.INFO, () -> display.toString().stripTrailing());
+        if (saveReport) {
+            Path output = Paths.get("RT", username + "_" + house + "_status.txt");
+            Files.createDirectories(output.getParent());
+            Files.writeString(output, report.toString(), StandardCharsets.UTF_8);
+            LOGGER.log(Level.INFO, "[OK] Report saved to {0}", output);
+        }
     }
 
     private String formatStatusLine(String line) {
@@ -128,13 +139,22 @@ public class CommandHandler {
             String[] stateParts = rawValue.split("@", 2);
             try {
                 int minutes = Integer.parseInt(stateParts[0]);
-            String state = minutes == 0
-                        ? "OFF"
-                        : minutes == 1 ? "ON" : "ON (" + minutes + " min)";
-                return device + ": " + state;
+                String state = formatDeviceState(minutes);
+                return String.format("  %-4s: %s", device, state);
             } catch (NumberFormatException e) {
-                return device + ": " + rawValue;
+                return String.format("  %-4s: %s", device, rawValue);
             }
+
+    }
+
+    private String formatDeviceState(int minutes) {
+        if (minutes == 0) {
+            return "OFF";
+        }
+        if (minutes == 1) {
+            return "ON";
+        }
+        return "ON (" + minutes + " min)";
     }
 
     private void createHouse(String house) throws IOException, GeneralSecurityException {
@@ -142,7 +162,7 @@ public class CommandHandler {
                 username, keystorePath, keystorePassword);
         StringBuilder payload = new StringBuilder();
         for (Map.Entry<String, byte[]> entry : keys.entrySet()) {
-            if (payload.length() > 0) {
+            if (!payload.isEmpty()) {
                 payload.append(';');
             }
             payload.append(entry.getKey())
@@ -163,14 +183,14 @@ public class CommandHandler {
         String normalizedSection = section.toUpperCase();
         out.println("GET_USER_CERT " + targetUser);
         String certificateLine = in.readLine();
-        if (certificateLine == null || certificateLine.startsWith("ERROR")) {
+        if (certificateLine == null || certificateLine.startsWith(ERROR_PREFIX)) {
             printResponse(certificateLine);
             return;
         }
 
         out.println("GET_SECTION_KEYS " + house + " " + normalizedSection);
         String keyLine = in.readLine();
-        if (keyLine == null || keyLine.startsWith("ERROR")) {
+        if (keyLine == null || keyLine.startsWith(ERROR_PREFIX)) {
             printResponse(keyLine);
             return;
         }
@@ -206,7 +226,7 @@ public class CommandHandler {
         out.println("EXECUTE_COMMAND " + house + " " + device.toUpperCase() + " " + value);
         String response = in.readLine();
         if ("OK".equals(response)) {
-            System.out.println("[OK] Command executed.");
+            LOGGER.info("[OK] Command executed.");
         } else {
             printResponse(response);
         }
@@ -219,7 +239,7 @@ public class CommandHandler {
         try (var writer = Files.newBufferedWriter(output, StandardCharsets.UTF_8)) {
             String line;
             while ((line = in.readLine()) != null && !"END_HISTORY".equals(line)) {
-                if (line.startsWith("ERROR")) {
+                if (line.startsWith(ERROR_PREFIX)) {
                     printResponse(line);
                     return;
                 }
@@ -227,7 +247,7 @@ public class CommandHandler {
                 writer.newLine();
             }
         }
-        System.out.println("[OK] History saved to " + output);
+        LOGGER.log(Level.INFO, "[OK] History saved to {0}", output);
     }
 
     private void requireParts(String[] parts, int count, CommandAction action)
@@ -240,24 +260,27 @@ public class CommandHandler {
 
     private void printResponse(String response) {
         if (response == null) {
-            System.out.println("[ERROR] Server closed the connection.");
+            LOGGER.severe("[ERROR] Server closed the connection.");
         } else {
             printResponseLine(response);
         }
     }
 
     private void printResponseLine(String response) {
-        if (response.startsWith("ERROR")) {
-            System.out.println("[ERROR] " + response.substring("ERROR:".length()).trim());
+        if (response.startsWith(ERROR_PREFIX)) {
+            if (LOGGER.isLoggable(Level.SEVERE)) {
+                String errorMessage = response.substring(ERROR_PREFIX.length()).trim();
+                LOGGER.log(Level.SEVERE, "[ERROR] {0}", errorMessage);
+            }
         } else if (response.startsWith("OK")) {
-            System.out.println("[OK] " + response);
+            LOGGER.log(Level.INFO, "[OK] {0}", response);
         } else {
-            System.out.println("  " + response);
+            LOGGER.log(Level.INFO, "  {0}", response);
         }
     }
 
     private void printBanner() {
-        System.out.println("""
+        LOGGER.info("""
 
                 ========================================
                     SPERTA COMMAND-LINE COMMANDS

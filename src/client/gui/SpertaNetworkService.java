@@ -4,7 +4,6 @@ import client.ClientCryptoHelper;
 import client.KeystoreManager;
 import javafx.collections.ObservableList;
 
-import java.awt.Desktop;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
@@ -31,7 +30,6 @@ import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -39,6 +37,8 @@ public class SpertaNetworkService {
 
     private static final Logger LOGGER = Logger.getLogger(SpertaNetworkService.class.getName());
     private static final String TLS_PROTOCOL = "TLSv1.3";
+    private static final String ERROR_PREFIX = "ERROR";
+    private static final String USER_KEYSTORE_PREFIX = "keystores/users/keystore.";
 
     private SSLContext sslContext;
     private String currentUsername;
@@ -143,6 +143,17 @@ public class SpertaNetworkService {
 
             in = new BufferedReader(new InputStreamReader(sslSocket.getInputStream(), StandardCharsets.UTF_8));
             out = new PrintWriter(new OutputStreamWriter(sslSocket.getOutputStream(), StandardCharsets.UTF_8), true);
+            authenticateSession();
+        }
+    }
+
+    private void authenticateSession() throws IOException {
+        out.println("AUTH " + currentUsername + " " + new String(currentSessionPassword));
+        String response = in.readLine();
+        if (response == null || !response.startsWith("OK:AUTHENTICATED")) {
+            throw new IOException(response == null
+                    ? "Server closed the connection during authentication."
+                    : response);
         }
     }
 
@@ -156,7 +167,7 @@ public class SpertaNetworkService {
             if ("END_HOUSES".equalsIgnoreCase(line) || line.startsWith("END")) {
                 break;
             }
-            if (line.startsWith("ERROR")) {
+            if (line.startsWith(ERROR_PREFIX)) {
                 throw new IOException("Failed to fetch houses: " + line);
             }
             if (!line.trim().isEmpty()) {
@@ -172,7 +183,7 @@ public class SpertaNetworkService {
 
     private void ensureHouseKeys(String houseName) throws IOException {
         try {
-            String ksPath = "keystores/users/keystore." + currentUsername;
+            String ksPath = USER_KEYSTORE_PREFIX + currentUsername;
             char[] password = KeystoreManager.deriveKeystorePassword(
                     currentUsername, currentSessionPassword);
             Map<String, byte[]> keys = ClientCryptoHelper.generateAndWrapSectionKeys(
@@ -208,7 +219,7 @@ public class SpertaNetworkService {
             if ("END_STATUS".equalsIgnoreCase(line) || line.startsWith("END")) {
                 break;
             }
-            if (line.startsWith("ERROR")) {
+            if (line.startsWith(ERROR_PREFIX)) {
                 throw new IOException("Failed to fetch device status: " + line);
             }
 
@@ -225,7 +236,7 @@ public class SpertaNetworkService {
     public synchronized String createHouse(String houseName) throws GeneralSecurityException, IOException {
         ensureConnected();
 
-        String ksPath = "keystores/users/keystore." + currentUsername;
+        String ksPath = USER_KEYSTORE_PREFIX + currentUsername;
         char[] derivedKsPass = KeystoreManager.deriveKeystorePassword(currentUsername, currentSessionPassword);
 
         Map<String, byte[]> wrappedSectionKeys = ClientCryptoHelper.generateAndWrapSectionKeys(
@@ -258,7 +269,7 @@ public class SpertaNetworkService {
 
         out.println("GET_USER_CERT " + targetUsername);
         String certResponse = in.readLine();
-        if (certResponse == null || certResponse.startsWith("ERROR")) {
+        if (certResponse == null || certResponse.startsWith(ERROR_PREFIX)) {
             throw new IOException("Target user certificate could not be retrieved: " + certResponse);
         }
 
@@ -266,14 +277,14 @@ public class SpertaNetworkService {
 
         out.println("GET_SECTION_KEYS " + houseId + " " + targetSection);
         String wrappedKeyLine = in.readLine();
-        if (wrappedKeyLine == null || wrappedKeyLine.startsWith("ERROR")) {
+        if (wrappedKeyLine == null || wrappedKeyLine.startsWith(ERROR_PREFIX)) {
             throw new IOException("Failed to retrieve current section keys: " + wrappedKeyLine);
         }
 
         Map<String, byte[]> rawKeys = new HashMap<>();
         rawKeys.put(targetSection, Base64.getDecoder().decode(wrappedKeyLine));
 
-        String ksPath = "keystores/users/keystore." + currentUsername;
+        String ksPath = USER_KEYSTORE_PREFIX + currentUsername;
         char[] derivedKsPass = KeystoreManager.deriveKeystorePassword(currentUsername, currentSessionPassword);
 
         Map<String, byte[]> rewrapped = ClientCryptoHelper.rewrapSectionKeys(
@@ -362,8 +373,8 @@ public class SpertaNetworkService {
                 if ("END_HISTORY".equalsIgnoreCase(line) || line.startsWith("END")) {
                     break;
                 }
-                if (line.startsWith("ERROR")) {
-                    throw new IOException("Failed to fetch device history: " + line);
+                if (line.startsWith(ERROR_PREFIX)) {
+                    throw new ServerResponseException("Failed to fetch device history: " + line);
                 }
                 writer.write(line);
                 writer.newLine();
@@ -371,6 +382,12 @@ public class SpertaNetworkService {
         }
 
         return tempFile;
+    }
+
+    private static final class ServerResponseException extends IOException {
+        private ServerResponseException(String message) {
+            super(message);
+        }
     }
 
     public synchronized void disconnect() {
