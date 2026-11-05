@@ -64,13 +64,13 @@ run-server: server
 
 # Run CLI Client instances
 run-client: client
-	$(JAVA) -cp $(BIN_DIR) client.SpertaClient 127.0.0.1:22345 keystores/users/truststore.user1 123456 keystores/users/keystore.user1 123456 user1 1234
+	$(JAVA) -cp $(BIN_DIR) client.SpertaClient 127.0.0.1:22345 user1 1234
 
 run-client2: client
-	$(JAVA) -cp $(BIN_DIR) client.SpertaClient 127.0.0.1:22345 keystores/users/truststore.user2 123456 keystores/users/keystore.user2 123456 user2 1234
+	$(JAVA) -cp $(BIN_DIR) client.SpertaClient 127.0.0.1:22345 user2 1234
 
 run-client3: client
-	$(JAVA) -cp $(BIN_DIR) client.SpertaClient 127.0.0.1:22345 keystores/users/truststore.user3 123456 keystores/users/keystore.user3 123456 user3 1234
+	$(JAVA) -cp $(BIN_DIR) client.SpertaClient 127.0.0.1:22345 user3 1234
 
 # Compile and run the JavaFX GUI
 run-gui: gui
@@ -95,7 +95,7 @@ run-server-jar: server-jar
 	$(JAVA) -jar SpertaServer.jar 22345 server-pw keystores/keystore.server 123456
 
 run-client-jar: client-jar
-	$(JAVA) -jar SpertaClient.jar 127.0.0.1:22345 keystores/users/truststore.user1 123456 keystores/users/keystore.user1 123456 user1 1234
+	$(JAVA) -jar SpertaClient.jar 127.0.0.1:22345 user1 1234
 
 # ------------------------------------------------------------------------------
 # Cleanup Targets

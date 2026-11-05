@@ -5,21 +5,30 @@ import utils.CryptoService;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.io.ObjectInputStream;
-import java.io.ObjectOutputStream;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
 import java.net.URI;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.nio.file.Files;
 import java.security.GeneralSecurityException;
+import java.security.KeyStore;
 import java.util.Scanner;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.TrustManagerFactory;
 
 public class SpertaClient {
 
     private static final Logger LOGGER = Logger.getLogger(SpertaClient.class.getName());
     private static final int DEFAULT_PORT = 22345;
+    private static final int CONNECTION_TIMEOUT_MILLIS = 10_000;
     private static final String DEFAULT_REFERENCE_JAR = "SpertaClient.jar";
     private static final int MAX_AUTH_ATTEMPTS = 3;
 
@@ -29,20 +38,44 @@ public class SpertaClient {
     }
 
     public void startClient(String[] args) {
-        if (args.length != 7) {
+        if (args.length != 3 && args.length != 7) {
             LOGGER.log(Level.SEVERE, 
-                    "Usage: java SpertaClient <serverAddress> <truststore> <password-truststore> "
+                    "Usage: java SpertaClient <serverAddress> <user-id> <password> "
+                    + "or java SpertaClient <serverAddress> <truststore> <password-truststore> "
                     + "<keystore> <password-keystore> <user-id> <password>");
             return;
         }
 
         String serverAddressRaw = args[0];
-        String truststorePath = args[1];
-        String truststorePassword = args[2];
-        String keystorePath = args[3];
-        String keystorePassword = args[4];
-        String username = args[5];
-        String password = args[6];
+        String truststorePath;
+        String truststorePassword;
+        String keystorePath;
+        String keystorePassword;
+        String username;
+        String password;
+
+        if (args.length == 3) {
+            username = args[1];
+            password = args[2];
+            truststorePath = "keystores/users/truststore." + username;
+            truststorePassword = getTruststorePassword();
+            keystorePath = "keystores/users/keystore." + username;
+            keystorePassword = new String(
+                    KeystoreManager.deriveKeystorePassword(username, password.toCharArray()));
+            try {
+                KeystoreManager.ensureUserKeystoreExists(username, password.toCharArray());
+            } catch (GeneralSecurityException | IOException e) {
+                System.err.println("[ERROR] Could not prepare local security files: " + e.getMessage());
+                return;
+            }
+        } else {
+            truststorePath = args[1];
+            truststorePassword = args[2];
+            keystorePath = args[3];
+            keystorePassword = args[4];
+            username = args[5];
+            password = args[6];
+        }
 
         if (username.contains(":")) {
             LOGGER.log(Level.SEVERE, "Error: Username cannot contain the character ':'");
@@ -68,161 +101,113 @@ public class SpertaClient {
             }
         }
 
+        System.out.println();
+        System.out.println("========================================");
+        System.out.println("        SPERTA COMMAND-LINE CLIENT");
+        System.out.println("========================================");
+        System.out.println("Connecting to " + host + ":" + port + " as " + username + "...");
+
         try (Scanner scanner = new Scanner(System.in)) {
             connectAndExecute(host, port, username, password, keystorePath, keystorePassword, scanner);
         }
     }
 
+    private String getTruststorePassword() {
+        String envPassword = System.getenv("SPERTA_TRUSTSTORE_PASSWORD");
+        if (envPassword != null && !envPassword.trim().isEmpty()) {
+            return envPassword;
+        }
+        String propertyPassword = System.getProperty("sperta.truststore.password");
+        return propertyPassword != null && !propertyPassword.trim().isEmpty()
+                ? propertyPassword
+                : "123456";
+    }
+
     private void connectAndExecute(String host, int port, String username, String password,
                                    String keystorePath, String keystorePassword, Scanner scanner) {
-        SSLSocketFactory sslFact = (SSLSocketFactory) SSLSocketFactory.getDefault();
+        try {
+            System.out.println("[INFO] Loading local keystore and truststore...");
+            SSLContext sslContext = createSslContext(
+                    keystorePath,
+                    keystorePassword,
+                    System.getProperty("javax.net.ssl.trustStore"),
+                    System.getProperty("javax.net.ssl.trustStorePassword"));
+            SSLSocketFactory sslFact = sslContext.getSocketFactory();
 
-        try (SSLSocket socket = (SSLSocket) sslFact.createSocket(host, port)) {
+            System.out.println("[INFO] Connecting to server...");
+            try (Socket plainSocket = new Socket()) {
+                plainSocket.connect(
+                        new InetSocketAddress(host, port),
+                        CONNECTION_TIMEOUT_MILLIS);
+                try (SSLSocket socket = (SSLSocket) sslFact.createSocket(
+                        plainSocket, host, port, true)) {
             socket.setEnabledProtocols(new String[]{"TLSv1.2", "TLSv1.3"});
+            socket.setSoTimeout(CONNECTION_TIMEOUT_MILLIS);
+            System.out.println("[INFO] Starting TLS handshake...");
             socket.startHandshake();
 
-            try (ObjectOutputStream outStream = new ObjectOutputStream(socket.getOutputStream());
-                 ObjectInputStream inStream = new ObjectInputStream(socket.getInputStream())) {
-
-                LOGGER.log(Level.INFO, "Connected securely to server at {0}:{1}", new Object[]{host, String.valueOf(port)});
-
-                // STEP 1: Binary Attestation
-                if (!doAttestation(outStream, inStream)) {
-                    return;
-                }
-
-                // STEP 2: Authentication
-                if (!doAuth(outStream, inStream, username, password, scanner, keystorePath, keystorePassword)) {
-                    return;
-                }
-
-                // STEP 3: Command Interaction Loop
+            try (BufferedReader in = new BufferedReader(
+                        new InputStreamReader(socket.getInputStream(), java.nio.charset.StandardCharsets.UTF_8));
+                 PrintWriter out = new PrintWriter(
+                        new OutputStreamWriter(socket.getOutputStream(), java.nio.charset.StandardCharsets.UTF_8), true)) {
+                System.out.println("[OK] Secure connection established.");
+                System.out.println("[OK] Client certificate accepted.");
                 CommandHandler handler = new CommandHandler(
-                        outStream, inStream, scanner, username, keystorePath, keystorePassword);
+                        in, out, scanner, username, keystorePath, keystorePassword);
                 handler.startLoop();
-
+            }
+            }
             }
         } catch (IOException e) {
-            LOGGER.log(Level.SEVERE, "Communication/Network I/O Error: {0}", e.getMessage());
-        } catch (ClassNotFoundException e) {
-            LOGGER.log(Level.SEVERE, "Protocol serialization error: {0}", e.getMessage());
+            System.err.println("[ERROR] Network error: " + e.getMessage());
         } catch (GeneralSecurityException e) {
-            LOGGER.log(Level.SEVERE, "Security/Crypto configuration error: {0}", e.getMessage());
+            System.err.println("[ERROR] TLS configuration error: " + e.getMessage());
         }
     }
 
-    private boolean doAttestation(ObjectOutputStream out, ObjectInputStream in)
-            throws IOException, ClassNotFoundException {
-
-        long nonce = in.readLong();
-        LOGGER.log(Level.INFO, "Received attestation challenge nonce: {0}", nonce);
-
-        byte[] calculatedHash;
-        try {
-            calculatedHash = calculateJarHashWithNonce(nonce);
-        } catch (Exception e) {
-            LOGGER.log(Level.SEVERE, "Error computing attestation hash: {0}", e.getMessage());
-            calculatedHash = new byte[0];
+    private SSLContext createSslContext(
+            String keystorePath,
+            String keystorePassword,
+            String truststorePath,
+            String truststorePassword)
+            throws GeneralSecurityException, IOException {
+        File keystoreFile = new File(keystorePath);
+        File truststoreFile = new File(truststorePath);
+        if (!keystoreFile.isFile()) {
+            throw new FileNotFoundException("Client keystore not found: " + keystoreFile.getPath());
+        }
+        if (!truststoreFile.isFile()) {
+            throw new FileNotFoundException("Client truststore not found: " + truststoreFile.getPath());
         }
 
-        out.writeObject(calculatedHash);
-        out.flush();
-
-        String response = (String) in.readObject();
-        if ("OK-ATTEST".equals(response)) {
-            LOGGER.log(Level.INFO, "Attestation OK");
-            return true;
-        } else {
-            LOGGER.log(Level.WARNING, "Attestation FAILED: {0}", response);
-            return false;
+        KeyStore keystore = KeyStore.getInstance("PKCS12");
+        try (var input = Files.newInputStream(keystoreFile.toPath())) {
+            keystore.load(input, keystorePassword.toCharArray());
+        } catch (IOException e) {
+            throw new IOException("Could not open client keystore. Check the username/password.", e);
         }
+
+        KeyStore truststore = KeyStore.getInstance("PKCS12");
+        try (var input = Files.newInputStream(truststoreFile.toPath())) {
+            truststore.load(input, truststorePassword.toCharArray());
+        } catch (IOException e) {
+            throw new IOException("Could not open client truststore. Check its password.", e);
+        }
+
+        KeyManagerFactory keyManagerFactory =
+                KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+        keyManagerFactory.init(keystore, keystorePassword.toCharArray());
+
+        TrustManagerFactory trustManagerFactory =
+                TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+        trustManagerFactory.init(truststore);
+
+        SSLContext sslContext = SSLContext.getInstance("TLS");
+        sslContext.init(
+                keyManagerFactory.getKeyManagers(),
+                trustManagerFactory.getTrustManagers(),
+                null);
+        return sslContext;
     }
 
-    private byte[] calculateJarHashWithNonce(long nonce) throws IOException, GeneralSecurityException {
-        File jarFile;
-        try {
-            URI uri = SpertaClient.class.getProtectionDomain().getCodeSource().getLocation().toURI();
-            jarFile = new File(uri.getPath());
-        } catch (Exception e) {
-            jarFile = new File(DEFAULT_REFERENCE_JAR);
-        }
-
-        if (jarFile.isDirectory()) {
-            jarFile = new File(DEFAULT_REFERENCE_JAR);
-        }
-
-        if (!jarFile.exists() || !jarFile.isFile()) {
-            throw new FileNotFoundException("Client binary reference not found at: " + jarFile.getAbsolutePath());
-        }
-
-        byte[] jarBytes = Files.readAllBytes(jarFile.toPath());
-        return CryptoService.computeHashWithNonce(nonce, jarBytes);
-    }
-
-    private boolean doAuth(ObjectOutputStream out, ObjectInputStream in,
-                           String username, String password, Scanner scanner,
-                           String keystorePath, String keystorePassword)
-            throws IOException, ClassNotFoundException, GeneralSecurityException {
-
-        String currentPassword = password;
-        int attempts = 0;
-
-        while (attempts < MAX_AUTH_ATTEMPTS) {
-            attempts++;
-            out.writeObject(username);
-            out.writeObject(currentPassword);
-            out.flush();
-
-            Object response = in.readObject();
-            AuthResult result = handleAuthStep(response, out, keystorePath, keystorePassword, username);
-
-            if (result == AuthResult.SUCCESS) {
-                return true;
-            }
-            if (result == AuthResult.FAILED_UNEXPECTED || attempts >= MAX_AUTH_ATTEMPTS) {
-                break;
-            }
-
-            LOGGER.log(Level.INFO, "Try again. Password: ");
-            if (!scanner.hasNextLine()) {
-                return false;
-            }
-            currentPassword = scanner.nextLine().trim();
-        }
-
-        LOGGER.log(Level.SEVERE, "Authentication failed or maximum attempts exceeded.");
-        return false;
-    }
-
-    private AuthResult handleAuthStep(Object response, ObjectOutputStream out,
-                                     String keystorePath, String keystorePassword, String username)
-            throws IOException, GeneralSecurityException {
-
-        if (response instanceof String && "SEND-CERT".equals(response)) {
-            LOGGER.log(Level.INFO, "OK-NEW-USER");
-            byte[] certBytes = ClientCryptoHelper.loadUserCertificateBytes(keystorePath, keystorePassword, username);
-            out.writeObject(certBytes);
-            out.flush();
-            LOGGER.log(Level.INFO, "Certificate dispatched to server.");
-            return AuthResult.SUCCESS;
-        }
-
-        if (response instanceof Integer authStatus) {
-            if (authStatus == 1) {
-                LOGGER.log(Level.INFO, "OK-USER");
-                return AuthResult.SUCCESS;
-            }
-            LOGGER.log(Level.WARNING, "WRONG-PWD");
-            return AuthResult.RETRY;
-        }
-
-        LOGGER.log(Level.SEVERE, "Unexpected authentication response from server.");
-        return AuthResult.FAILED_UNEXPECTED;
-    }
-
-    private enum AuthResult {
-        SUCCESS,
-        RETRY,
-        FAILED_UNEXPECTED
-    }
 }

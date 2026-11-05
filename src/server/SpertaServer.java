@@ -23,6 +23,9 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Map;
 import java.util.Base64;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.ConsoleHandler;
 import java.util.logging.Formatter;
 import java.util.logging.Handler;
@@ -70,6 +73,7 @@ public class SpertaServer {
 
         try {
             StorageDAO storageDAO = new StorageDAO(storagePassword);
+            ScheduledExecutorService expirationMonitor = startExpirationMonitor(storageDAO);
 
             SSLContext sslContext = createSSLContext(keystorePath, serverPassword);
             SSLServerSocketFactory ssf = sslContext.getServerSocketFactory();
@@ -91,9 +95,75 @@ public class SpertaServer {
                     new ServerThread((SSLSocket) clientSocket, storageDAO).start();
                 }
             }
+            finally {
+                expirationMonitor.shutdownNow();
+            }
 
         } catch (Exception e) {
             LOGGER.log(Level.SEVERE, "Server encountered a fatal error", e);
+        }
+    }
+
+    private static ScheduledExecutorService startExpirationMonitor(StorageDAO storage) {
+        ScheduledExecutorService monitor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "sperta-device-expiration-monitor");
+            thread.setDaemon(true);
+            return thread;
+        });
+        monitor.scheduleAtFixedRate(
+                () -> expireDevices(storage),
+                1,
+                1,
+                TimeUnit.SECONDS);
+        return monitor;
+    }
+
+    private static void expireDevices(StorageDAO storage) {
+        File homesDir = new File("data/homes");
+        File[] files = homesDir.listFiles((dir, name) -> name.endsWith(".txt"));
+        if (files == null) {
+            return;
+        }
+
+        for (File file : files) {
+            String houseName = file.getName().substring(0, file.getName().length() - 4);
+            try {
+                synchronized (storage) {
+                    House house = storage.loadHouse(houseName);
+                    if (house == null) {
+                        continue;
+                    }
+
+                    boolean houseChanged = false;
+                    for (House.Section section : house.getSections().values()) {
+                        for (Map.Entry<String, String> device : section.getDevices().entrySet()) {
+                            String[] stateParts = device.getValue().split("@", 2);
+                            if (stateParts.length != 2) {
+                                continue;
+                            }
+
+                            try {
+                                int minutes = Integer.parseInt(stateParts[0]);
+                                long startedAt = Long.parseLong(stateParts[1]);
+                                long expiresAt = startedAt + minutes * 60_000L;
+                                if (minutes > 1 && System.currentTimeMillis() >= expiresAt) {
+                                    section.setDeviceValue(device.getKey(), "0");
+                                    storage.appendDeviceLog(houseName, device.getKey(), "0");
+                                    houseChanged = true;
+                                }
+                            } catch (NumberFormatException ignored) {
+                                // Preserve malformed legacy state for explicit correction.
+                            }
+                        }
+                    }
+
+                    if (houseChanged) {
+                        storage.saveHouse(house);
+                    }
+                }
+            } catch (Exception e) {
+                LOGGER.log(Level.WARNING, "Could not expire devices in house " + houseName, e);
+            }
         }
     }
 
@@ -290,39 +360,41 @@ public class SpertaServer {
                     out.println("END_HOUSES");
 
                 } else if (line.startsWith("GET_STATUS ")) {
-                    String houseId = line.substring(11).trim();
-                    House house = storage.loadHouse(houseId);
-                    if (house != null) {
-                        boolean houseChanged = false;
-                        for (Map.Entry<String, House.Section> entry : house.getSections().entrySet()) {
-                            if (house.isAuthorized(username, entry.getKey())) {
-                                for (Map.Entry<String, String> dev : entry.getValue().getDevices().entrySet()) {
-                                    String state = dev.getValue();
-                                    String[] stateParts = state.split("@", 2);
-                                    if (stateParts.length == 2) {
-                                        try {
-                                            int minutes = Integer.parseInt(stateParts[0]);
-                                            long startedAt = Long.parseLong(stateParts[1]);
-                                            long expiresAt = startedAt + minutes * 60_000L;
-                                            if (minutes > 0 && System.currentTimeMillis() >= expiresAt) {
-                                                entry.getValue().setDeviceValue(dev.getKey(), "0");
-                                                storage.appendDeviceLog(
-                                                        houseId, dev.getKey(), "0");
-                                                houseChanged = true;
+                    synchronized (storage) {
+                        String houseId = line.substring(11).trim();
+                        House house = storage.loadHouse(houseId);
+                        if (house != null) {
+                            boolean houseChanged = false;
+                            for (Map.Entry<String, House.Section> entry : house.getSections().entrySet()) {
+                                if (house.isAuthorized(username, entry.getKey())) {
+                                    for (Map.Entry<String, String> dev : entry.getValue().getDevices().entrySet()) {
+                                        String state = dev.getValue();
+                                        String[] stateParts = state.split("@", 2);
+                                        if (stateParts.length == 2) {
+                                            try {
+                                                int minutes = Integer.parseInt(stateParts[0]);
+                                                long startedAt = Long.parseLong(stateParts[1]);
+                                                long expiresAt = startedAt + minutes * 60_000L;
+                                                if (minutes > 1 && System.currentTimeMillis() >= expiresAt) {
+                                                    entry.getValue().setDeviceValue(dev.getKey(), "0");
+                                                    storage.appendDeviceLog(
+                                                            houseId, dev.getKey(), "0");
+                                                    houseChanged = true;
+                                                }
+                                            } catch (NumberFormatException ignored) {
+                                                // Preserve malformed legacy state for explicit correction.
                                             }
-                                        } catch (NumberFormatException ignored) {
-                                            // Preserve malformed legacy state for explicit correction.
                                         }
+                                        out.println(dev.getKey() + ":" + entry.getValue().getDevices().get(dev.getKey()));
                                     }
-                                    out.println(dev.getKey() + ":" + entry.getValue().getDevices().get(dev.getKey()));
                                 }
                             }
+                            if (houseChanged) {
+                                storage.saveHouse(house);
+                            }
                         }
-                        if (houseChanged) {
-                            storage.saveHouse(house);
-                        }
+                        out.println("END_STATUS");
                     }
-                    out.println("END_STATUS");
 
                 } else if (line.startsWith("CREATE_HOUSE ")) {
                     String[] parts = line.split("\\s+", 3);

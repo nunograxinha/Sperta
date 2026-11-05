@@ -1,84 +1,107 @@
-# Projeto 2 - SC 2025/2026
-## Sistema Distribuído Sperta
+# Project 2 - SC 2025/2026
+## Sperta Distributed System
 
-### Autores
+### Authors
 
 - Diogo Chambel - 53319
 - Márcio Moreira - 41972
 - Nuno Graxinha - 59855
 
-### Desenvolvimento
+### Development
 
-O projeto foi desenvolvido em ambiente Windows, utilizando Java e JavaFX.
+The project was developed for Windows using Java and JavaFX.
 
-### Requisitos
+### Requirements
 
-- JDK com `java`, `javac` e `keytool` disponíveis.
-- JavaFX 17 em `lib/javafx-sdk-17.0.21/lib`.
-- `make` para utilizar os comandos do Makefile.
+- A JDK with `java`, `javac`, and `keytool` available.
+- JavaFX 17 in `lib/javafx-sdk-17.0.21/lib`.
+- `make` for the Makefile commands.
 
-### Compilação
+The portable client launcher can run without a system Java installation when the
+bundled `runtime` folder is present. The `runtime` folder is intentionally not
+tracked in Git because the JDK is larger than GitHub's file-size limit.
 
-Na raiz da diretoria `Sperta/`:
+### Compilation
+
+From the `Sperta/` directory:
 
 ```text
 make
 ```
 
-Para criar os JARs:
+To create the JAR files:
 
 ```text
 make jar
 ```
 
-Para compilar a aplicação gráfica:
+To compile the graphical application:
 
 ```text
 make gui
 ```
 
-Para remover os ficheiros compilados e os JARs:
+To remove compiled files and JARs:
 
 ```text
 make clean
 ```
 
-### Execução
+### Running
 
-#### Servidor
+#### Server
 
-O servidor utiliza, por omissão, o porto `22345`, a cifra `server-pw`, a keystore
-`keystores/keystore.server` e a password `123456`:
+By default, the server uses port `22345`, cipher password `server-pw`, server
+keystore `keystores/keystore.server`, and keystore password `123456`:
 
 ```text
 make run-server
 ```
 
-Também pode ser iniciado através do JAR:
+It can also be started from the JAR:
 
 ```text
 make run-server-jar
 ```
 
-Com parâmetros explícitos:
+With explicit parameters:
+
+Sample commands:
 
 ```text
-java -cp bin server.SpertaServer <porto> <password-cifra> <caminho-keystore> <password-keystore-server>
-java -jar SpertaServer.jar <porto> <password-cifra> <caminho-keystore> <password-keystore-server>
+java -cp bin server.SpertaServer <port> <cipher-password> <keystore-path> <server-keystore-password>
+java -jar SpertaServer.jar <port> <cipher-password> <keystore-path> <server-keystore-password>
 ```
 
-#### Cliente gráfico
+Example with the default values:
+
+```text
+java -cp bin server.SpertaServer 22345 server-pw keystores/keystore.server 123456
+java -jar SpertaServer.jar 22345 server-pw keystores/keystore.server 123456
+```
+
+Keep the server window open while clients are connected. The server must be
+listening on port `22345` before the client tries to connect.
+
+#### Graphical client
 
 ```text
 make run-gui
 ```
 
-No ecrã de login, preencha o servidor, porto, username e password.
-O botão **Create New Keystore / Truststore** regista um novo utilizador,
-cria a keystore/truststore locais e envia o certificado do utilizador para
-`data/certs/<username>.cert` no servidor.
+Or, on a portable client computer:
 
-#### Cliente de linha de comandos
+```text
+start-client.bat
+```
+
+At the login screen, enter the server address, port, username, and password.
+The **Create New Keystore / Truststore** button creates the local keystore and
+truststore. It also uploads only the public certificate to
+`data/certs/<username>.cert` on the server. The private key remains on the
+client computer.
+
+#### Command-line client
 
 ```text
 make run-client
@@ -86,47 +109,63 @@ make run-client2
 make run-client3
 ```
 
-Ou manualmente:
+These targets use the same simple credentials flow as the graphical client.
+The client derives the keystore password and resolves the local keystore
+paths automatically.
+
+Or manually:
 
 ```text
-java -cp bin client.SpertaClient <serverAddress> <truststore> <password-truststore> <keystore> <password-keystore> <user-id> <password>
-java -jar SpertaClient.jar <serverAddress> <truststore> <password-truststore> <keystore> <password-keystore> <user-id> <password>
+java -cp bin client.SpertaClient <serverAddress> <user-id> <password>
+java -jar SpertaClient.jar <serverAddress> <user-id> <password>
 ```
 
-### Funcionalidades
+The legacy form with explicit keystore paths is also supported:
 
-Depois de autenticado, o cliente gráfico permite:
+```text
+java -cp bin client.SpertaClient <serverAddress> <truststore> <truststore-password> <keystore> <keystore-password> <user-id> <password>
+java -jar SpertaClient.jar <serverAddress> <truststore> <truststore-password> <keystore> <keystore-password> <user-id> <password>
+```
 
-- Criar casas e descobrir apenas casas acessíveis ao utilizador.
-- Registar dispositivos; os IDs são gerados automaticamente, por exemplo `M1`, `M2`.
-- Conceder acesso a utilizadores por secção.
-- Executar comandos EC com valores entre `0` e `600`.
-- Consultar o estado dos dispositivos e o histórico RH.
-- Criar e abrir relatórios RT.
+Example:
 
-As permissões são verificadas no servidor. O proprietário tem acesso a todas
-as secções; outros utilizadores só têm acesso às secções que lhes foram
-concedidas.
+```text
+java -jar SpertaClient.jar 127.0.0.1:22345 user1 1234
+```
 
-### Ficheiros gerados
+### Features
 
-- `keystores/users/keystore.<username>` - keystore do utilizador.
-- `keystores/users/truststore.<username>` - truststore do utilizador.
-- `data/certs/<username>.cert` - certificado do utilizador no servidor.
-- `data/homes/` - casas cifradas e respetivos hashes.
-- `data/keys/` - chaves de secção cifradas para cada utilizador.
-- `RH/<house>_<device>_history.csv` - histórico de comandos do dispositivo.
-- `RT/<user>_<house>_status.txt` - estado atual dos dispositivos.
+After authentication, the graphical client allows users to:
 
-O relatório RT tem o formato:
+- Create houses and discover only houses they can access.
+- Register devices with automatically generated IDs such as `M1` and `M2`.
+- Grant section access to other users.
+- Execute EC commands with values from `0` to `600`.
+- View device status and RH history.
+- Create and open RT reports.
+
+Permissions are enforced by the server. The owner can access every section;
+other users can access only the sections granted to them.
+
+### Generated files
+
+- `keystores/users/keystore.<username>` - the user's private key and certificate.
+- `keystores/users/truststore.<username>` - the server truststore.
+- `data/certs/<username>.cert` - the user's public certificate on the server.
+- `data/homes/` - encrypted houses and their integrity hashes.
+- `data/keys/` - encrypted section keys for each user.
+- `RH/<house>_<device>_history.csv` - device command history.
+- `RT/<user>_<house>_status.txt` - current device status.
+
+The RT report format is:
 
 ```text
 User: user1, House: house1
 M1: ON (2 min), 2026-11-05 16:05:00
 ```
 
-O histórico RH tem cabeçalho CSV e regista também a transição para `0`
-quando um temporizador termina:
+The RH history has a CSV header and also records the transition to `0` when a
+timer expires:
 
 ```text
 device,value,timestamp
