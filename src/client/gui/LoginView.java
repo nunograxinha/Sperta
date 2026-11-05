@@ -189,13 +189,17 @@ public class LoginView {
             try {
                 // 1. Register credentials on server
                 String response = networkService.registerUserOnServer(host, port, username, password);
-                if (!response.startsWith("OK")) {
+                boolean alreadyRegistered = response.contains("User already exists");
+                if (!response.startsWith("OK") && !alreadyRegistered) {
                     Platform.runLater(() -> setStatus("Server rejected registration: " + response, true));
                     return;
                 }
 
                 // 2. Generate local user keystore with derived key and truststore
-                ClientCryptoHelper.createNewUserKeystoreAndTruststore(username, password, password);
+                File localKeystore = new File("keystores/users/keystore." + username);
+                if (!localKeystore.exists()) {
+                    ClientCryptoHelper.createNewUserKeystoreAndTruststore(username, password, password);
+                }
                 byte[] certificate = ClientCryptoHelper.extractUserCertificate(
                         "keystores/users/keystore." + username,
                         new String(client.KeystoreManager.deriveKeystorePassword(username, password.toCharArray())),
@@ -208,7 +212,10 @@ public class LoginView {
                     return;
                 }
 
-                Platform.runLater(() -> setStatus("User '" + username + "' registered on server and keys created!", false));
+                String message = alreadyRegistered
+                        ? "Local keys created for existing user '" + username + "'."
+                        : "User '" + username + "' registered on server and keys created!";
+                Platform.runLater(() -> setStatus(message, false));
             } catch (InterruptedException e) {
                 // SonarQube java:S2142 - Restore interrupted state
                 Thread.currentThread().interrupt();
