@@ -52,43 +52,25 @@ public class SpertaClient {
     }
 
     public void startClient(String[] args) {
-        if (args.length != 3 && args.length != 7) {
-            LOGGER.log(Level.SEVERE, 
-                    "Usage: java SpertaClient <serverAddress> <user-id> <password> "
-                    + "or java SpertaClient <serverAddress> <truststore> <password-truststore> "
-                    + "<keystore> <password-keystore> <user-id> <password>");
+        if (args.length != 3) {
+            LOGGER.log(Level.SEVERE,
+                    "Usage: java SpertaClient <serverAddress> <user-id> <password>");
             return;
         }
 
         String serverAddressRaw = args[0];
-        String truststorePath;
-        String truststorePassword;
-        String keystorePath;
-        String keystorePassword;
-        String username;
-        String password;
-
-        if (args.length == 3) {
-            username = args[1];
-            password = args[2];
-            truststorePath = "keystores/users/truststore." + username;
-            truststorePassword = getTruststorePassword();
-            keystorePath = "keystores/users/keystore." + username;
-            keystorePassword = new String(
-                    KeystoreManager.deriveKeystorePassword(username, password.toCharArray()));
-            try {
-                KeystoreManager.ensureUserKeystoreExists(username, password.toCharArray());
-            } catch (GeneralSecurityException | IOException e) {
-                LOGGER.log(Level.SEVERE, "[ERROR] Could not prepare local security files: {0}", e.getMessage());
-                return;
-            }
-        } else {
-            truststorePath = args[1];
-            truststorePassword = args[2];
-            keystorePath = args[3];
-            keystorePassword = args[4];
-            username = args[5];
-            password = args[6];
+        String username = args[1];
+        String password = args[2];
+        String truststorePath = "keystores/users/truststore." + username;
+        String truststorePassword = getTruststorePassword();
+        String keystorePath = "keystores/users/keystore." + username;
+        String keystorePassword = new String(
+                KeystoreManager.deriveKeystorePassword(username, password.toCharArray()));
+        try {
+            KeystoreManager.ensureUserKeystoreExists(username, password.toCharArray());
+        } catch (GeneralSecurityException | IOException e) {
+            LOGGER.log(Level.SEVERE, "[ERROR] Could not prepare local security files: {0}", e.getMessage());
+            return;
         }
 
         if (username.contains(":")) {

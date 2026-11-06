@@ -87,11 +87,6 @@ Or manually:
   java -cp bin client.SpertaClient <serverAddress> <user-id> <password>
   java -jar SpertaClient.jar <serverAddress> <user-id> <password>
 
-The legacy form with explicit keystore paths is also supported:
-
-  java -cp bin client.SpertaClient <serverAddress> <truststore> <truststore-password> <keystore> <keystore-password> <user-id> <password>
-  java -jar SpertaClient.jar <serverAddress> <truststore> <truststore-password> <keystore> <keystore-password> <user-id> <password>
-
 Example:
 
   java -jar SpertaClient.jar 127.0.0.1:22345 user1 1234

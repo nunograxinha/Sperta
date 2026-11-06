@@ -120,13 +120,6 @@ java -cp bin client.SpertaClient <serverAddress> <user-id> <password>
 java -jar SpertaClient.jar <serverAddress> <user-id> <password>
 ```
 
-The legacy form with explicit keystore paths is also supported:
-
-```text
-java -cp bin client.SpertaClient <serverAddress> <truststore> <truststore-password> <keystore> <keystore-password> <user-id> <password>
-java -jar SpertaClient.jar <serverAddress> <truststore> <truststore-password> <keystore> <keystore-password> <user-id> <password>
-```
-
 Example:
 
 ```text
