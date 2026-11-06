@@ -156,13 +156,25 @@ public class LoginView {
                 networkService.disconnect();
                 Platform.runLater(() -> {
                     loginButton.setDisable(false);
-                    String message = ex.getMessage();
-                    setStatus(message == null || message.isBlank()
-                            ? LOGIN_ERROR_MESSAGE
-                            : message, true);
+                    setStatus(formatLoginError(ex), true);
                 });
             }
         }).start();
+    }
+
+    private String formatLoginError(Exception exception) {
+        String message = exception.getMessage();
+        if (message == null || message.isBlank()) {
+            return LOGIN_ERROR_MESSAGE;
+        }
+
+        String normalized = message.toLowerCase();
+        if (normalized.contains("keystore")
+                || normalized.contains("password was incorrect")
+                || normalized.contains("keystore was tampered")) {
+            return LOGIN_ERROR_MESSAGE;
+        }
+        return message;
     }
 
     private void handleCreateKeystoreDialog() {
