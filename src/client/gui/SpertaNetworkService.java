@@ -380,7 +380,7 @@ public class SpertaNetworkService {
                             java.time.Instant.ofEpochMilli(dev.getLastCommandTimestamp()),
                             java.time.ZoneId.systemDefault())
                             .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
-                    pw.println(dev.getDeviceId() + ": " + dev.getValue() + ", " + timestamp);
+                    pw.println(dev.getDeviceId() + ": " + dev.getInitialMinutes() + ", " + timestamp);
                 }
             }
         }
