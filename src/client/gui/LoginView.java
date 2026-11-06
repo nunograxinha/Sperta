@@ -144,6 +144,7 @@ public class LoginView {
             try {
                 networkService.setConnectionEndpoint(host, port);
                 networkService.initializeSecurity(username, password.toCharArray());
+                networkService.connectAndAuthenticate();
 
                 Platform.runLater(() -> {
                     DashboardView dashboard = new DashboardView(networkService, stage, username);
@@ -152,9 +153,13 @@ public class LoginView {
                     stage.centerOnScreen();
                 });
             } catch (GeneralSecurityException | IOException ex) {
+                networkService.disconnect();
                 Platform.runLater(() -> {
                     loginButton.setDisable(false);
-                    setStatus(LOGIN_ERROR_MESSAGE, true);
+                    String message = ex.getMessage();
+                    setStatus(message == null || message.isBlank()
+                            ? LOGIN_ERROR_MESSAGE
+                            : message, true);
                 });
             }
         }).start();

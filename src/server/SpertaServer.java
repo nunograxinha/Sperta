@@ -335,9 +335,10 @@ public class SpertaServer {
                 }
                 out.println("OK:AUTHENTICATED");
                 return true;
-            } catch (IOException | GeneralSecurityException e) {
-                LOGGER.log(Level.WARNING, "Authentication failed for user {0}", username);
-                out.println("ERROR: Authentication failed");
+            } catch (IOException | GeneralSecurityException | SecurityException e) {
+                LOGGER.log(Level.WARNING, "Authentication failed for user {0}: {1}",
+                        new Object[]{username, e.getMessage()});
+                out.println("ERROR: Authentication failed: " + e.getMessage());
                 return false;
             }
         }

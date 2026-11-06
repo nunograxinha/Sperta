@@ -147,6 +147,10 @@ public class SpertaNetworkService {
         }
     }
 
+    public synchronized void connectAndAuthenticate() throws IOException {
+        ensureConnected();
+    }
+
     private void authenticateSession() throws IOException {
         out.println("AUTH " + currentUsername + " " + new String(currentSessionPassword));
         String response = in.readLine();

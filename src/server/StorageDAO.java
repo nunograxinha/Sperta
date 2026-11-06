@@ -14,7 +14,6 @@ import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -183,8 +182,9 @@ public class StorageDAO {
                 PrintWriter pw = new PrintWriter(fw)) {
                 pw.println(username + ":" + hashBase64 + ":" + saltBase64);
             }
+            updateFileHash(usersFile.getPath());
             return true;
-        } catch (NoSuchAlgorithmException | IOException e) {
+        } catch (GeneralSecurityException | IOException e) {
             LOGGER.log(Level.WARNING, "Failed to register new user: {0}", e.getMessage());
             return false;
         }
