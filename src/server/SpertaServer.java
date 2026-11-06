@@ -153,7 +153,7 @@ public class SpertaServer {
         boolean houseChanged = false;
         for (House.Section section : house.getSections().values()) {
             for (Map.Entry<String, String> device : section.getDevices().entrySet()) {
-                houseChanged |= expireDevice(storage, houseName, section, device);
+                houseChanged |= expireDevice(section, device);
             }
         }
         if (houseChanged) {
@@ -161,9 +161,7 @@ public class SpertaServer {
         }
     }
 
-    private static boolean expireDevice(
-            StorageDAO storage, String houseName, House.Section section, Map.Entry<String, String> device)
-            throws IOException {
+    private static boolean expireDevice(House.Section section, Map.Entry<String, String> device) {
         String[] stateParts = device.getValue().split("@", 2);
         if (stateParts.length != 2) {
             return false;
@@ -175,7 +173,6 @@ public class SpertaServer {
             long expiresAt = startedAt + minutes * 60_000L;
             if (minutes > 1 && System.currentTimeMillis() >= expiresAt) {
                 section.setDeviceValue(device.getKey(), "0");
-                storage.appendDeviceLog(houseName, device.getKey(), "0");
                 return true;
             }
         } catch (NumberFormatException ignored) {
@@ -444,7 +441,7 @@ public class SpertaServer {
                 String houseId = line.substring("GET_STATUS ".length()).trim();
                 House house = storage.loadHouse(houseId);
                 if (house != null) {
-                    boolean changed = expireDevices(house, houseId, out, username);
+                    boolean changed = expireDevices(house, out, username);
                     if (changed) {
                         storage.saveHouse(house);
                     }
@@ -453,8 +450,7 @@ public class SpertaServer {
             }
         }
 
-        private boolean expireDevices(House house, String houseId, PrintWriter out, String username)
-                throws IOException {
+        private boolean expireDevices(House house, PrintWriter out, String username) {
             boolean changed = false;
             for (Map.Entry<String, House.Section> entry : house.getSections().entrySet()) {
                 if (!house.isAuthorized(username, entry.getKey())) {
@@ -462,7 +458,7 @@ public class SpertaServer {
                 }
                 for (Map.Entry<String, String> device : entry.getValue().getDevices().entrySet()) {
                     String previousState = device.getValue();
-                    String state = expireDevice(houseId, entry.getValue(), device);
+                    String state = expireDevice(entry.getValue(), device);
                     out.println(device.getKey() + ":" + state);
                     changed |= !previousState.equals(state);
                 }
@@ -470,8 +466,7 @@ public class SpertaServer {
             return changed;
         }
 
-        private String expireDevice(String houseId, House.Section section, Map.Entry<String, String> device)
-                throws IOException {
+        private String expireDevice(House.Section section, Map.Entry<String, String> device) {
             String state = device.getValue();
             String[] parts = state.split("@", 2);
             if (parts.length == 2) {
@@ -480,7 +475,6 @@ public class SpertaServer {
                     long expiresAt = Long.parseLong(parts[1]) + minutes * 60_000L;
                     if (minutes > 1 && System.currentTimeMillis() >= expiresAt) {
                         section.setDeviceValue(device.getKey(), "0");
-                        storage.appendDeviceLog(houseId, device.getKey(), "0");
                         return "0";
                     }
                 } catch (NumberFormatException ignored) {
@@ -492,20 +486,32 @@ public class SpertaServer {
 
         private void createHouse(String line, PrintWriter out, String username)
                 throws IOException, GeneralSecurityException {
-            String[] parts = line.split("\\s+", 3);
-            if (parts.length < 2) {
+            String commandPrefix = "CREATE_HOUSE ";
+            if (!line.startsWith(commandPrefix)) {
                 out.println(INVALID_PARAMETERS);
                 return;
             }
-            String houseName = parts[1];
+
+            String arguments = line.substring(commandPrefix.length()).trim();
+            int payloadSeparator = arguments.lastIndexOf(' ');
+            if (payloadSeparator <= 0 || payloadSeparator == arguments.length() - 1) {
+                out.println(INVALID_PARAMETERS);
+                return;
+            }
+
+            String houseName = arguments.substring(0, payloadSeparator).trim();
+            String encodedKeys = arguments.substring(payloadSeparator + 1).trim();
+            if (houseName.isEmpty()) {
+                out.println(INVALID_PARAMETERS);
+                return;
+            }
+
             if (storage.houseExists(houseName)) {
                 out.println("ERROR: House already exists");
                 return;
             }
             storage.saveHouse(new House(houseName, username));
-            if (parts.length == 3) {
-                saveSectionKeys(parts[2], houseName, username);
-            }
+            saveSectionKeys(encodedKeys, houseName, username);
             out.println("OK:HOUSE_CREATED");
         }
 
@@ -575,7 +581,6 @@ public class SpertaServer {
             String deviceId = sectionKey + section.getNextDeviceId();
             section.setDeviceValue(deviceId, "0");
             storage.saveHouse(house);
-            storage.appendDeviceLog(houseName, deviceId, "0");
             out.println("OK:DEVICE_REGISTERED:" + deviceId);
         }
 
@@ -611,10 +616,10 @@ public class SpertaServer {
             } else if (section == null || !section.getDevices().containsKey(deviceId)) {
                 out.println("ERROR: Device not found");
             } else {
-                section.setDeviceValue(deviceId, minutes + "@" + System.currentTimeMillis());
+                long timestamp = System.currentTimeMillis();
+                section.setDeviceValue(deviceId, minutes + "@" + timestamp);
                 storage.saveHouse(house);
-                storage.appendDeviceLog(houseName, deviceId, String.valueOf(minutes));
-                out.println("OK");
+                out.println("OK:" + timestamp);
             }
         }
 

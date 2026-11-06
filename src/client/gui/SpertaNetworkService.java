@@ -326,7 +326,37 @@ public class SpertaNetworkService {
         if (response == null) {
             throw new IOException("Server closed connection without responding.");
         }
+        if (response.startsWith("OK:")) {
+            long timestamp;
+            try {
+                timestamp = Long.parseLong(response.substring("OK:".length()));
+            } catch (NumberFormatException e) {
+                throw new IOException("Server returned an invalid command timestamp.", e);
+            }
+            appendLocalHistory(houseId, deviceId, durationMinutes, timestamp);
+        }
         return response;
+    }
+
+    private void appendLocalHistory(String houseId, String deviceId, int value, long timestamp)
+            throws IOException {
+        Path directory = Paths.get("RH");
+        Files.createDirectories(directory);
+        Path file = directory.resolve(houseId + "_" + deviceId.toUpperCase() + "_history.csv");
+        boolean needsHeader = !Files.exists(file) || Files.size(file) == 0;
+        try (BufferedWriter writer = Files.newBufferedWriter(file, StandardCharsets.UTF_8,
+                java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND)) {
+            if (needsHeader) {
+                writer.write("device,value,timestamp");
+                writer.newLine();
+            }
+            String formattedTimestamp = LocalDateTime.ofInstant(
+                    java.time.Instant.ofEpochMilli(timestamp),
+                    java.time.ZoneId.systemDefault())
+                    .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+            writer.write(deviceId.toUpperCase() + "," + value + "," + formattedTimestamp);
+            writer.newLine();
+        }
     }
 
     public synchronized File saveStatusToFile(String houseId, ObservableList<DeviceViewModel> devices) throws IOException {
@@ -357,42 +387,15 @@ public class SpertaNetworkService {
         return file;
     }
 
-    private Path createSecureTempFile(String prefix, String suffix) throws IOException {
-        Path appTempDir = Paths.get(System.getProperty("user.dir"), "target", "temp");
-        Files.createDirectories(appTempDir);
-        return Files.createTempFile(appTempDir, prefix, suffix);
-    }
-
     public synchronized File fetchDeviceHistory(String houseId, String deviceId) throws IOException {
         ensureConnected();
-        out.println("GET_DEVICE_HISTORY " + houseId + " " + deviceId);
-
-        Path tempPath = createSecureTempFile("history_" + deviceId + "_", ".csv");
-        File tempFile = tempPath.toFile();
-        tempFile.deleteOnExit();
-
-        try (BufferedWriter writer = Files.newBufferedWriter(tempPath, StandardCharsets.UTF_8)) {
-            String line;
-            while ((line = in.readLine()) != null) {
-                if ("END_HISTORY".equalsIgnoreCase(line) || line.startsWith("END")) {
-                    break;
-                }
-                if (line.startsWith(ERROR_PREFIX)) {
-                    throw new ServerResponseException("Failed to fetch device history: " + line);
-                }
-                writer.write(line);
-                writer.newLine();
-            }
+        Path historyPath = Paths.get("RH", houseId + "_" + deviceId.toUpperCase() + "_history.csv");
+        if (!Files.exists(historyPath)) {
+            throw new IOException("No local history exists for this device.");
         }
-
-        return tempFile;
+        return historyPath.toFile();
     }
 
-    private static final class ServerResponseException extends IOException {
-        private ServerResponseException(String message) {
-            super(message);
-        }
-    }
 
     public synchronized void disconnect() {
         try {

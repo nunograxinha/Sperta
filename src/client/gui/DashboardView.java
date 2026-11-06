@@ -653,7 +653,7 @@ public class DashboardView {
             try {
                 String resp = networkService.executeCommand(selectedHouse, selected.getDeviceId(), targetVal);
                 Platform.runLater(() -> {
-                    if ("OK".equalsIgnoreCase(resp.trim())) {
+                    if (resp != null && resp.trim().toUpperCase().startsWith("OK:")) {
                         setFeedback("Command sent: OK", false);
                         selected.updateTimer(targetVal);
                         devicesTable.refresh();

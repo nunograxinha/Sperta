@@ -7,6 +7,7 @@ import java.io.FileOutputStream;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -178,6 +179,17 @@ public class StorageDAO {
             }
 
             // 4. Append username:hash:salt to users file
+            if (usersFile.length() > 0) {
+                try (RandomAccessFile file = new RandomAccessFile(usersFile, "r")) {
+                    file.seek(usersFile.length() - 1);
+                    byte lastByte = file.readByte();
+                    if (lastByte != '\n' && lastByte != '\r') {
+                        try (FileWriter separator = new FileWriter(usersFile, true)) {
+                            separator.write(System.lineSeparator());
+                        }
+                    }
+                }
+            }
             try (FileWriter fw = new FileWriter(usersFile, true);
                 PrintWriter pw = new PrintWriter(fw)) {
                 pw.println(username + ":" + hashBase64 + ":" + saltBase64);
