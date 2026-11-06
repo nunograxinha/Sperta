@@ -22,6 +22,8 @@ import java.security.GeneralSecurityException;
 public class LoginView {
 
     private static final String USER_KEYSTORE_PREFIX = "keystores/users/keystore.";
+    private static final String LOGIN_ERROR_MESSAGE =
+            "Authentication failed: incorrect username or password.";
 
     private final Stage stage;
     private final SpertaNetworkService networkService;
@@ -140,6 +142,7 @@ public class LoginView {
 
         new Thread(() -> {
             try {
+                networkService.setConnectionEndpoint(host, port);
                 networkService.initializeSecurity(username, password.toCharArray());
 
                 Platform.runLater(() -> {
@@ -151,7 +154,7 @@ public class LoginView {
             } catch (GeneralSecurityException | IOException ex) {
                 Platform.runLater(() -> {
                     loginButton.setDisable(false);
-                    setStatus("Authentication failed: " + ex.getMessage(), true);
+                    setStatus(LOGIN_ERROR_MESSAGE, true);
                 });
             }
         }).start();
